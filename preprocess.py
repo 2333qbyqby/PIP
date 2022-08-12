@@ -95,11 +95,14 @@ def process_amass():
 
 def process_dipimu():
     imu_mask = [7, 8, 11, 12, 0, 2]
-    test_split = ['s_09', 's_10']
+    # test_split = ['s_09', 's_10']
+    test_split = ['s_01']
     accs, oris, poses, trans = [], [], [], []
 
     for subject_name in test_split:
         for motion_name in os.listdir(os.path.join(paths.raw_dipimu_dir, subject_name)):
+            # print(os.path.join(paths.raw_dipimu_dir, subject_name, motion_name))
+            # path = "acc2pos/DIP_IMU_and_Others/DIP_IMU/s_01/04.pkl"
             path = os.path.join(paths.raw_dipimu_dir, subject_name, motion_name)
             data = pickle.load(open(path, 'rb'), encoding='latin1')
             acc = torch.from_numpy(data['imu_acc'][:, imu_mask]).float()
@@ -191,4 +194,4 @@ def process_totalcapture():
 if __name__ == '__main__':
     # process_amass()
     process_dipimu()
-    process_totalcapture()
+    # process_totalcapture()

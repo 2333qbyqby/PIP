@@ -1,0 +1,7 @@
+chumpy
+vctoolkit==0.1.5.39
+open3d
+pybullet
+qpsolvers==1.8.0
+cvxopt==1.3.0
+tqdm==4.64.0

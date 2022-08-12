@@ -142,57 +142,57 @@ def evaluate(net, data_dir, sequence_ids=None, flush_cache=False, pose_evaluator
     if len(missing_ids) > 0:
         run_pipeline(net, data_dir, missing_ids)
 
-    pose_errors = []
-    tran_errors = {window_size: [] for window_size in list(range(1, 8))}
-    zmp_errors = []
-    for i in tqdm.tqdm(sequence_ids):
-        result = torch.load(os.path.join(result_dir, '%d.pt' % i))
-        pose_p, tran_p = result[0], result[1]
-        pose_t, tran_t = pose_t_all[i], tran_t_all[i]
-        if evaluate_pose:
-            pose_t = art.math.axis_angle_to_rotation_matrix(pose_t).view_as(pose_p)
-            pose_errors.append(pose_evaluator(pose_p, pose_t, tran_p, tran_t))
-        if evaluate_tran:
-            # compute gt move distance at every frame
-            move_distance_t = torch.zeros(tran_t.shape[0])
-            v = (tran_t[1:] - tran_t[:-1]).norm(dim=1)
-            for j in range(len(v)):
-                move_distance_t[j + 1] = move_distance_t[j] + v[j]
-
-            for window_size in tran_errors.keys():
-                # find all pairs of start/end frames where gt moves `window_size` meters
-                frame_pairs = []
-                start, end = 0, 1
-                while end < len(move_distance_t):
-                    if move_distance_t[end] - move_distance_t[start] < window_size:
-                        end += 1
-                    else:
-                        if len(frame_pairs) == 0 or frame_pairs[-1][1] != end:
-                            frame_pairs.append((start, end))
-                        start += 1
-
-                # calculate mean distance error
-                errs = []
-                for start, end in frame_pairs:
-                    vel_p = tran_p[end] - tran_p[start] 
-                    vel_t = tran_t[end] - tran_t[start]
-                    errs.append((vel_t - vel_p).norm() / (move_distance_t[end] - move_distance_t[start]) * window_size)
-                if len(errs) > 0:
-                    tran_errors[window_size].append(sum(errs) / len(errs))
-
-        if evaluate_zmp:
-            zmp_errors.append(evaluate_zmp_distance(pose_p, tran_p))
-
-    if evaluate_pose:
-        pose_errors = torch.stack(pose_errors).mean(dim=0)
-        for name, error in zip(pose_evaluator.names, pose_errors):
-            print('%s: %.4f' % (name, error[0]))
-    if evaluate_zmp:
-        print('ZMP Distance (m): %.4f' % (sum(zmp_errors) / len(zmp_errors)))
-    if evaluate_tran:
-        plt.plot([0] + [_ for _ in tran_errors.keys()], [0] + [torch.tensor(_).mean() for _ in tran_errors.values()], label=net.name)
-        plt.legend(fontsize=15)
-        plt.show()
+    # pose_errors = []
+    # tran_errors = {window_size: [] for window_size in list(range(1, 8))}
+    # zmp_errors = []
+    # for i in tqdm.tqdm(sequence_ids):
+    #     result = torch.load(os.path.join(result_dir, '%d.pt' % i))
+    #     pose_p, tran_p = result[0], result[1]
+    #     pose_t, tran_t = pose_t_all[i], tran_t_all[i]
+    #     if evaluate_pose:
+    #         pose_t = art.math.axis_angle_to_rotation_matrix(pose_t).view_as(pose_p)
+    #         pose_errors.append(pose_evaluator(pose_p, pose_t, tran_p, tran_t))
+    #     if evaluate_tran:
+    #         # compute gt move distance at every frame
+    #         move_distance_t = torch.zeros(tran_t.shape[0])
+    #         v = (tran_t[1:] - tran_t[:-1]).norm(dim=1)
+    #         for j in range(len(v)):
+    #             move_distance_t[j + 1] = move_distance_t[j] + v[j]
+    #
+    #         for window_size in tran_errors.keys():
+    #             # find all pairs of start/end frames where gt moves `window_size` meters
+    #             frame_pairs = []
+    #             start, end = 0, 1
+    #             while end < len(move_distance_t):
+    #                 if move_distance_t[end] - move_distance_t[start] < window_size:
+    #                     end += 1
+    #                 else:
+    #                     if len(frame_pairs) == 0 or frame_pairs[-1][1] != end:
+    #                         frame_pairs.append((start, end))
+    #                     start += 1
+    #
+    #             # calculate mean distance error
+    #             errs = []
+    #             for start, end in frame_pairs:
+    #                 vel_p = tran_p[end] - tran_p[start]
+    #                 vel_t = tran_t[end] - tran_t[start]
+    #                 errs.append((vel_t - vel_p).norm() / (move_distance_t[end] - move_distance_t[start]) * window_size)
+    #             if len(errs) > 0:
+    #                 tran_errors[window_size].append(sum(errs) / len(errs))
+    #
+    #     if evaluate_zmp:
+    #         zmp_errors.append(evaluate_zmp_distance(pose_p, tran_p))
+    #
+    # if evaluate_pose:
+    #     pose_errors = torch.stack(pose_errors).mean(dim=0)
+    #     for name, error in zip(pose_evaluator.names, pose_errors):
+    #         print('%s: %.4f' % (name, error[0]))
+    # if evaluate_zmp:
+    #     print('ZMP Distance (m): %.4f' % (sum(zmp_errors) / len(zmp_errors)))
+    # if evaluate_tran:
+    #     plt.plot([0] + [_ for _ in tran_errors.keys()], [0] + [torch.tensor(_).mean() for _ in tran_errors.values()], label=net.name)
+    #     plt.legend(fontsize=15)
+    #     plt.show()
 
 
 if __name__ == '__main__':
@@ -201,8 +201,9 @@ if __name__ == '__main__':
     full_pose_evaluator = FullPoseEvaluator()
 
     # Note: to evaluate Absolute Jitter Error, use full_pose_evaluator
-    print('\n')
-    evaluate(net, paths.totalcapture_dir, pose_evaluator=reduced_pose_evaluator, evaluate_pose=True, evaluate_tran=True, evaluate_zmp=True, flush_cache=False)
+    # print('\n')
+    # evaluate(net, paths.totalcapture_dir, pose_evaluator=reduced_pose_evaluator, evaluate_pose=True, evaluate_tran=True, evaluate_zmp=True, flush_cache=False)
 
     print('\n')
-    evaluate(net, paths.dipimu_dir, pose_evaluator=reduced_pose_evaluator, evaluate_pose=True, evaluate_zmp=True, flush_cache=False)
+    # evaluate(net, paths.dipimu_dir, pose_evaluator=reduced_pose_evaluator, evaluate_pose=True, evaluate_zmp=True, flush_cache=False)
+    evaluate(net, paths.dipimu_dir, pose_evaluator=reduced_pose_evaluator, evaluate_pose=True, evaluate_zmp=True, flush_cache=True)

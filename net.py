@@ -41,7 +41,7 @@ class PIP(torch.nn.Module):
         body_model = art.ParametricModel(paths.smpl_file)
         self.inverse_kinematics_R = body_model.inverse_kinematics_R
         self.forward_kinematics = body_model.forward_kinematics
-        self.dynamics_optimizer = PhysicsOptimizer(debug=False)
+        self.dynamics_optimizer = PhysicsOptimizer(debug=True)
         self.rnn_states = [None for _ in range(5)]
 
         self.load_state_dict(torch.load(paths.weights_file))
