@@ -16,6 +16,10 @@ You also need to compile and install [rbdl](https://github.com/rbdl/rbdl) with p
 
 *Installing `pytorch` with CUDA is recommended but not mandatory. During evaluation, the motion prediction can run at ~120fps on CPU, but computing the errors may be very slow without CUDA.*
 
+```
+pip install torch==1.8.2 torchvision==0.9.2 torchaudio===0.8.2 --extra-index-url https://download.pytorch.org/whl/lts/1.8/cu111
+```
+
 *If you have configured [TransPose](https://github.com/Xinyu-Yi/TransPose/), just use its environment and install the missing packages including the `rbdl`.*
 
 ### Prepare SMPL body model
