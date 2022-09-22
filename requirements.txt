@@ -1,8 +1,9 @@
 chumpy
 vctoolkit==0.1.5.39
 open3d
-pybullet
+pybullet==3.2.5
 qpsolvers==1.8.0
 cvxopt==1.3.0
 tqdm==4.64.0
 Cython==0.29.30
+numpy==1.23.3
