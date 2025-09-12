@@ -4,7 +4,7 @@ from articulate.utils.torch import *
 from config import *
 from utils import *
 from dynamics import PhysicsOptimizer
-
+import torch
 
 class PIP(torch.nn.Module):
     name = 'PIP'
