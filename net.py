@@ -12,27 +12,27 @@ class PIP(torch.nn.Module):
 
     def __init__(self):
         super(PIP, self).__init__()
-        self.rnn1 = RNNWithInit(input_size=72,
+        self.rnn1 = RNNWithInit(input_size=72,      #PL RNN
                                 output_size=joint_set.n_leaf * 3,
                                 hidden_size=self.n_hidden,
                                 num_rnn_layer=2,
                                 dropout=0.4)
-        self.rnn2 = RNN(input_size=72 + joint_set.n_leaf * 3,
+        self.rnn2 = RNN(input_size=72 + joint_set.n_leaf * 3, #PARNN
                         output_size=joint_set.n_full * 3,
                         hidden_size=self.n_hidden,
                         num_rnn_layer=2,
                         dropout=0.4)
-        self.rnn3 = RNN(input_size=72 + joint_set.n_full * 3,
+        self.rnn3 = RNN(input_size=72 + joint_set.n_full * 3, #RA RNN
                         output_size=joint_set.n_reduced * 6,
                         hidden_size=self.n_hidden,
                         num_rnn_layer=2,
                         dropout=0.4)
-        self.rnn4 = RNNWithInit(input_size=72 + joint_set.n_full * 3,
+        self.rnn4 = RNNWithInit(input_size=72 + joint_set.n_full * 3, #VA RNN
                                 output_size=24 * 3,
                                 hidden_size=self.n_hidden,
                                 num_rnn_layer=2,
                                 dropout=0.4)
-        self.rnn5 = RNN(input_size=72 + joint_set.n_full * 3,
+        self.rnn5 = RNN(input_size=72 + joint_set.n_full * 3, #CF
                         output_size=2,
                         hidden_size=64,
                         num_rnn_layer=2,
@@ -89,7 +89,11 @@ class PIP(torch.nn.Module):
         jvel_init = torch.zeros(24 * 3)
         x = (normalize_and_concat(glb_acc, glb_rot), lj_init, jvel_init)
         leaf_joint, full_joint, global_6d_pose, joint_velocity, contact = [_[0] for _ in self.forward([x])]
+        #pose：这是神经网络预测的关节旋转姿态，表示每个关节相对于其父关节的旋转。
+        # 在传递给物理优化器之前，这些姿态是纯粹基于 IMU 数据和神经网络学习得到的。
         pose = self._reduced_glb_6d_to_full_local_mat(glb_rot.view(-1, 6, 3, 3)[:, -1], global_6d_pose)
+        #joint_velocity：这是神经网络预测的关节速度，表示每个关节的线速度。
+        #这些速度同样是从 IMU 数据推断出来的，需要经过物理优化以确保与姿态变化一致并符合物理规律
         joint_velocity = joint_velocity.view(-1, 24, 3).bmm(glb_rot[:, -1].transpose(1, 2)) * vel_scale
         pose_opt, tran_opt = [], []
         for p, v, c, a in zip(pose, joint_velocity, contact, glb_acc):

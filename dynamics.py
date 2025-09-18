@@ -50,17 +50,17 @@ class PhysicsOptimizer:
         self.qdot = np.zeros(self.model.qdot_size)
 
     def optimize_frame(self, pose, jvel, contact, acc):
-        q_ref = smpl_to_rbdl(pose, torch.zeros(3))[0]
-        v_ref = jvel.numpy()
-        c_ref = contact.sigmoid().numpy()
-        a_ref = acc.numpy()
+        q_ref = smpl_to_rbdl(pose, torch.zeros(3))[0]  # 神经网络预测的姿态
+        v_ref = jvel.numpy()                           # 神经网络预测的关节速度
+        c_ref = contact.sigmoid().numpy()              # 神经网络预测的接触信息
+        a_ref = acc.numpy()                            # IMU传感器测量的加速度
         q = self.q
         qdot = self.qdot
 
         if q is None:
             self.q = q_ref
             return pose, torch.zeros(3)
-
+        print('optimize frame')
         # determine the contact joints and points
         self.model.update_kinematics(q, qdot, np.zeros(self.model.qdot_size))
         Js = [np.empty((0, self.model.qdot_size))]
@@ -121,7 +121,7 @@ class PhysicsOptimizer:
                                       'RSHOULDER', 'LELBOW', 'RELBOW', 'LWRIST', 'RWRIST'], v_ref[:22]):
                 joint_id = vars(Body)[joint_name]
                 if joint_id == Body.LFOOT or joint_id == Body.RFOOT: continue
-                cur_vel = self.model.calc_point_velocity(q, qdot, joint_id)
+                cur_vel = self.model.calc_point_velocity(q, qdot, joint_id) # ?
                 a_des = self.params['kp_linear'] * v * self.params['delta_t'] - self.params['kd_linear'] * cur_vel
                 A = self.model.calc_point_Jacobian(q, joint_id)
                 b = -self.model.calc_point_acceleration(q, qdot, np.zeros(75), joint_id) + a_des
