@@ -92,7 +92,7 @@ class PhysicsOptimizer:
                                        [np.empty(0)], [np.zeros((0, self.model.qdot_size))], [np.empty(0)]
         A_, b_ = None, None
 
-        # joint angle PD controller
+        # joint angle PD controller（对应论文公式3）
         if True:
             A = np.hstack((np.zeros((self.model.qdot_size - 3, 3)), np.eye((self.model.qdot_size - 3))))
             b = self.params['kp_angular'] * art.math.angle_difference(q_ref[3:], q[3:]) - self.params['kd_angular'] * qdot[3:]
@@ -114,7 +114,7 @@ class PhysicsOptimizer:
                 As1.append(A * 2)
                 bs1.append(b * 2)
 
-        # joint position PD controller (using joint velocity to determine target joint position)
+        # joint position PD controller (using joint velocity to determine target joint position)（论文公式5）
         if True:
             for joint_name, v in zip(['ROOT', 'LHIP', 'RHIP', 'SPINE1', 'LKNEE', 'RKNEE', 'SPINE2', 'LANKLE', 'RANKLE',
                                       'SPINE3', 'LFOOT', 'RFOOT', 'NECK', 'LCLAVICLE', 'RCLAVICLE', 'HEAD', 'LSHOULDER',
@@ -122,7 +122,7 @@ class PhysicsOptimizer:
                 joint_id = vars(Body)[joint_name]
                 if joint_id == Body.LFOOT or joint_id == Body.RFOOT: continue
                 cur_vel = self.model.calc_point_velocity(q, qdot, joint_id) # ?
-                a_des = self.params['kp_linear'] * v * self.params['delta_t'] - self.params['kd_linear'] * cur_vel
+                a_des = self.params['kp_linear'] * v * self.params['delta_t'] - self.params['kd_linear'] * cur_vel #对应论文的
                 A = self.model.calc_point_Jacobian(q, joint_id)
                 b = -self.model.calc_point_acceleration(q, qdot, np.zeros(75), joint_id) + a_des
                 As1.append(A * self.params['coeff_jvel'])
@@ -155,7 +155,7 @@ class PhysicsOptimizer:
             As2.append(np.eye(nc * 3) * self.params['coeff_lambda_old'])
             bs2.append(np.zeros(nc * 3))
 
-        # Signorini’s conditions of lambda
+        # Signorini’s conditions of lambda对应论文公式9中的E_lambda
         if True:
             if nc != 0:
                 A = [np.eye(3) * max(cp[1] - self.params['floor_y'], 0.005) for cp in collision_points]
@@ -163,11 +163,11 @@ class PhysicsOptimizer:
                 As2.append(A * self.params['coeff_lambda'])
                 bs2.append(np.zeros(nc * 3))
 
-        # tau size
+        # tau size(包含残余力约束)
         if True:
             As3.append(art.math.block_diagonal_matrix_np([
-                np.eye(6) * self.params['coeff_virtual'],
-                np.eye(self.model.qdot_size - 6) * self.params['coeff_tau']
+                np.eye(6) * self.params['coeff_virtual'], # 对应论文中的残余力约束
+                np.eye(self.model.qdot_size - 6) * self.params['coeff_tau']#关节扭矩约束
             ]))
             bs3.append(np.zeros(self.model.qdot_size))
 
