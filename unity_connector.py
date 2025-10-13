@@ -3,6 +3,22 @@ import threading
 import queue
 import time
 from typing import List, Tuple, Optional
+import pybullet as p
+import numpy as np
+import sys
+import pathlib
+from articulate.utils.rbdl import *
+from articulate.utils.bullet import *
+from utils import *
+# 添加项目根目录到Python路径
+project_root = pathlib.Path(__file__).parent
+sys.path.append(str(project_root))
+
+# 导入配置和工具
+from config import paths
+from utils import set_pose
+import articulate as art
+import torch
 
 
 class UnityConnector:
@@ -31,6 +47,14 @@ class UnityConnector:
         self.send_thread = None
         self.receive_thread = None
         self.running = False
+        
+        # PyBullet相关属性
+        self.physics_client = None
+        self.robot_id = None
+        self.skeleton_debug_items = []  # 用于存储骨架可视化调试项的ID
+        
+        # SMPL模型用于骨架可视化
+        self.smpl_model = art.ParametricModel(paths.smpl_file)
 
     def connect_as_server(self) -> bool:
         """
@@ -263,39 +287,109 @@ class UnityConnector:
             
         print("连接已关闭")
 
+    def init_pybullet_visualization(self):
+        """
+        初始化PyBullet可视化环境
+        """
+        mu = 0.6
+        supp_poly_size = 0.2
+        self.model = RBDLModel(paths.physics_model_file, update_kinematics_by_hand=True)
+        self.params = read_debug_param_values_from_json(paths.physics_parameter_file)
+        self.friction_constraint_matrix = np.array([[np.sqrt(2), -mu, 0],
+                                               [-np.sqrt(2), -mu, 0],
+                                               [0, -mu, np.sqrt(2)],
+                                               [0, -mu, -np.sqrt(2)]])
+        self.support_polygon = np.array([[-supp_poly_size / 2, 0, -supp_poly_size / 2],
+                                    [supp_poly_size / 2, 0, -supp_poly_size / 2],
+                                    [-supp_poly_size / 2, 0, supp_poly_size / 2],
+                                    [supp_poly_size / 2, 0, supp_poly_size / 2]])
+
+        p.connect(p.GUI)
+        p.configureDebugVisualizer(flag=p.COV_ENABLE_Y_AXIS_UP, enable=1)
+        # 禁用重力，仅用于可视化
+        #p.setGravity(0, 0, 0)
+        # 禁用实时模拟，防止模型因物理效应而移动
+        #p.setRealTimeSimulation(0)
+        self.id_robot = p.loadURDF(paths.physics_model_file, [0, 0, 0], useFixedBase=False,
+                              flags=p.URDF_MERGE_FIXED_LINKS)
+        change_color(self.id_robot, [198 / 255, 238 / 255, 0, 1.0])
+        p.loadURDF(paths.plane_file, [0, -0.881, 0.0], [-0.7071068, 0, 0, 0.7071068])
+        load_debug_params_into_bullet_from_json(paths.physics_parameter_file)
+
+    def update_visualization(self, pose_data: List[float], tran_data: List[float],
+                            cj_data: Optional[List[int]] = None,
+                            grf_data: Optional[List[float]] = None):
+        """
+        更新可视化显示
+        
+        Args:
+            pose_data: 从Unity接收的姿态数据(216个值，表示24个3x3旋转矩阵)
+            tran_data: 位移数据
+            cj_data: 接触关节数据
+            grf_data: 地面反作用力数据
+        """
+        # 检查pose_data是否为216个值(24个关节的3x3矩阵)
+        if len(pose_data) == 216:
+            # 将216个值转换为24个3x3矩阵
+            rotation_matrices = []
+            for i in range(24):
+                matrix = np.array(pose_data[i*9:(i+1)*9]).reshape(3, 3)
+                rotation_matrices.append(matrix)
+            
+            # 第一个矩阵是全局根关节旋转，其余23个是相对父关节的旋转
+            # 构造完整的SMPL格式姿态数据 [n, 24, 3, 3]
+            poses = np.array(rotation_matrices).reshape(1, 24, 3, 3)
+            
+            # 转换为RBDL格式的关节角度
+            q = smpl_to_rbdl(poses, np.array(tran_data))[0]
+        else:
+            # 兼容旧的72个值格式(轴角表示)
+            q = np.concatenate([tran_data, pose_data])
+        
+        # 应用姿态到机器人
+        set_pose(self.id_robot, q)
+
 
 # 使用示例
 if __name__ == "__main__":
     # 创建连接器实例
     connector = UnityConnector()
-    
-    # 作为服务器启动（等待Unity连接）
-    if connector.connect_as_server():
-        try:
-            frame_count = 0
-            while connector.running:  # 修改为检查running状态
-                # 示例发送数据
-                pose_data = [0.0] * 72  # SMPL pose参数 (24 joints * 3)
-                tran_data = [0.0, 0.0, 0.0]  # 位移向量
-                cj_data = [1, 2, 3]  # 接触关节索引
-                grf_data = [0.0, 0.0, 0.0]  # 地面反作用力
-                
-                # 添加一些变化使动画可见
-                pose_data[frame_count % 72] = frame_count * 0.01
-                
-                # 发送数据
-                connector.send_data(pose_data, tran_data, cj_data, grf_data)
-                
-                # 检查是否有接收到的数据
-                received = connector.receive_data(timeout=0.01)  # 非阻塞检查
-                if received:
-                    pose, tran, cj, grf = received
-                    print(f"接收到数据: pose长度={len(pose)}, tran长度={len(tran)}")
-                
-                frame_count += 1
-                time.sleep(1/60)  # 60 FPS
-                
-        except KeyboardInterrupt:
-            print("\n停止通信")
-        finally:
+    connector.init_pybullet_visualization()
+    # 检查命令行参数，如果提供了test参数则运行测试姿态
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "test":
+        print("运行测试姿态...")
+        connector.test_poses()
+        connector.close()
+    else:
+        # 作为服务器启动（等待Unity连接）
+        if connector.connect_as_server():
+            try:
+                frame_count = 0
+                while connector.running:  # 修改为检查running状态
+                    # 接收数据并进行可视化处理
+                    received = connector.receive_data(timeout=0.01)  # 非阻塞检查
+                    if received:
+                        pose, tran, cj, grf = received
+                        print(f"接收到数据: pose长度={len(pose)}, tran长度={len(tran)}")
+                        # 调用PyBullet进行可视化
+                        connector.update_visualization(pose, tran)
+                    else:
+                        # 如果没有接收到数据，使用测试数据进行可视化
+                        # T-pose测试数据
+                        test_pose = [0.0] * 72  # T-pose，所有关节角度为0
+                        test_tran = [0.0, 0.0, 0.0]  # 根位置在原点
+                        #connector.visualize_data(test_pose, test_tran)
+                    
+                    frame_count += 1
+                    time.sleep(1/60)  # 60 FPS
+                    
+            except KeyboardInterrupt:
+                print("\n停止通信")
+            finally:
+                connector.close()
+        else:
+            # 如果无法连接到Unity，运行测试姿态
+            print("无法连接到Unity，运行测试姿态...")
+            connector.test_poses()
             connector.close()
