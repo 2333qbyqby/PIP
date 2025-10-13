@@ -306,6 +306,14 @@ class UnityConnector:
 
         p.connect(p.GUI)
         p.configureDebugVisualizer(flag=p.COV_ENABLE_Y_AXIS_UP, enable=1)
+
+        # 设置默认相机位置（可选）
+        p.resetDebugVisualizerCamera(
+            cameraDistance=2.0,  # 相机距离
+            cameraYaw=45,  # 水平旋转角度
+            cameraPitch=-30,  # 垂直倾斜角度
+            cameraTargetPosition=[0, 0, 0]  # 相机焦点位置
+        )
         # 禁用重力，仅用于可视化
         #p.setGravity(0, 0, 0)
         # 禁用实时模拟，防止模型因物理效应而移动

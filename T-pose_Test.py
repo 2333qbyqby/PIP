@@ -1,7 +1,7 @@
 import time
 import sys
 import pathlib
-
+import keyboard
 # 添加项目根目录到Python路径
 project_root = pathlib.Path(__file__).parent
 sys.path.append(str(project_root))
@@ -49,6 +49,15 @@ def test_t_pose():
     # 保持程序运行，直到用户中断
     try:
         while True:
+            camera_info = p.getDebugVisualizerCamera()
+            current_yaw, current_pitch, current_distance = camera_info[5][0], camera_info[4][1], camera_info[11][2]
+            if keyboard.is_pressed('a'):
+                p.resetDebugVisualizerCamera(
+                    cameraDistance=2.5,
+                    cameraYaw=current_yaw + 1,
+                    cameraPitch=current_pitch,
+                    cameraTargetPosition=[0, 0, 0]
+                )
             #p.stepSimulation()
             time.sleep(1 / 60)
     except KeyboardInterrupt:
