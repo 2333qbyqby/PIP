@@ -321,7 +321,8 @@ class UnityConnector:
         self.id_robot = p.loadURDF(paths.physics_model_file, [0, 0, 0], useFixedBase=False,
                               flags=p.URDF_MERGE_FIXED_LINKS)
         change_color(self.id_robot, [198 / 255, 238 / 255, 0, 1.0])
-        p.loadURDF(paths.plane_file, [0, -0.881, 0.0], [-0.7071068, 0, 0, 0.7071068])
+        #p.loadURDF(paths.plane_file, [0, -0.881, 0.0], [-0.7071068, 0, 0, 0.7071068])
+        p.loadURDF(paths.plane_file, [0, 0.881, 0.0], [0, 0, 0, 1])
         load_debug_params_into_bullet_from_json(paths.physics_parameter_file)
 
     def update_visualization(self, pose_data: List[float], tran_data: List[float],

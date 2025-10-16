@@ -58,7 +58,7 @@ def test_t_pose():
                     cameraPitch=current_pitch,
                     cameraTargetPosition=[0, 0, 0]
                 )
-            #p.stepSimulation()
+            p.stepSimulation()
             time.sleep(1 / 60)
     except KeyboardInterrupt:
         print("\n程序退出")
