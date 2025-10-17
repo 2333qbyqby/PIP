@@ -1287,7 +1287,7 @@
 		<parent link = "left_shoulder_ry" />
 		<child link = "left_shoulder_rz" />
 		<limit effort="1000.0" lower= "-1.0" upper= "1.0" velocity="0.5" />
-		<origin rpy = "-0.7 0 0" xyz ="0 0 0"  />
+		<origin rpy = "0 0 0" xyz ="0 0 0"  />
 		<axis xyz = "1.0 0.0 0.0" />
 	</joint>
 	<link name = "right_shoulder_limb">
@@ -1365,7 +1365,7 @@
 		<parent link = "right_shoulder_ry" />
 		<child link = "right_shoulder_rz" />
 		<limit effort="1000.0" lower= "-1.0" upper= "1.0" velocity="0.5" />
-		<origin rpy = "0.7 0 0" xyz ="0 0 0"  />
+		<origin rpy = "0 0 0" xyz ="0 0 0"  />
 		<axis xyz = "1.0 0.0 0.0" />
 	</joint>
 	<link name = "left_elbow_limb">

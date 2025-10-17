@@ -349,8 +349,14 @@ class UnityConnector:
             # 构造完整的SMPL格式姿态数据 [n, 24, 3, 3]
             poses = np.array(rotation_matrices).reshape(1, 24, 3, 3)
             
+            # 打印肩关节及手臂关节的旋转矩阵
+            self.print_arm_rotation_matrices(poses[0])
+            
             # 转换为RBDL格式的关节角度
             q = smpl_to_rbdl(poses, np.array(tran_data))[0]
+            
+            # 打印转换后的RBDL关节角度
+            self.print_rbdl_joint_angles(q)
         else:
             # 兼容旧的72个值格式(轴角表示)
             q = np.concatenate([tran_data, pose_data])
@@ -358,6 +364,57 @@ class UnityConnector:
         # 应用姿态到机器人
         set_pose(self.id_robot, q)
 
+    def print_arm_rotation_matrices(self, poses):
+        """
+        打印肩关节及以下手臂关节的旋转矩阵
+        
+        Args:
+            poses: SMPL格式的姿态数据 [24, 3, 3]
+        """
+        # SMPL关节索引:
+        # LCLAVICLE = 13, RCLAVICLE = 14
+        # LSHOULDER = 16, RSHOULDER = 17
+        # LELBOW = 18, RELBOW = 19
+        # LWRIST = 20, RWRIST = 21
+        # LHAND = 22, RHAND = 23
+        
+        joint_names = ['LCLAVICLE', 'RCLAVICLE', 'LSHOULDER', 'RSHOULDER', 'LELBOW', 'RELBOW', 'LWRIST', 'RWRIST', 'LHAND', 'RHAND']
+        joint_indices = [13, 14, 16, 17, 18, 19, 20, 21, 22, 23]
+        
+        print("=" * 50)
+        print("Arm Joints Rotation Matrices:")
+        print("=" * 50)
+        
+        for name, idx in zip(joint_names, joint_indices):
+            print(f"{name} (Joint {idx}):")
+            print(f"  {poses[idx, 0, :]}")
+            print(f"  {poses[idx, 1, :]}")
+            print(f"  {poses[idx, 2, :]}")
+            print()
+        
+        print("=" * 50)
+    
+    def print_rbdl_joint_angles(self, q):
+        """
+        打印转换为RBDL格式后的关节角度
+        
+        Args:
+            q: RBDL格式的关节角度数据 [75]
+        """
+        print("=" * 50)
+        print("RBDL Joint Angles (first 30 values):")
+        print("=" * 50)
+        
+        # 打印根关节位置和旋转
+        print(f"Root Position: [{q[0]:.6f}, {q[1]:.6f}, {q[2]:.6f}]")
+        print(f"Root Rotation (Euler): [{q[3]:.6f}, {q[4]:.6f}, {q[5]:.6f}]")
+        
+        # 打印前30个关节角度值
+        print("Joint Angles (first 30):")
+        for i in range(min(30, len(q) - 6)):
+            print(f"  q[{i+6}] = {q[i+6]:.6f}")
+        
+        print("=" * 50)
 
 # 使用示例
 if __name__ == "__main__":
