@@ -325,7 +325,7 @@ class UnityConnector:
         p.loadURDF(paths.plane_file, [0, 0.881, 0.0], [0, 0, 0, 1])
         load_debug_params_into_bullet_from_json(paths.physics_parameter_file)
 
-    def update_visualization(self, pose_data: List[float], tran_data: List[float],
+    def update_visualization(self, pose_data: List[float], tran_data: List[float], is_Global: bool = False,
                             cj_data: Optional[List[int]] = None,
                             grf_data: Optional[List[float]] = None):
         """
@@ -345,9 +345,56 @@ class UnityConnector:
                 matrix = np.array(pose_data[i*9:(i+1)*9]).reshape(3, 3)
                 rotation_matrices.append(matrix)
             
-            # 第一个矩阵是全局根关节旋转，其余23个是相对父关节的旋转
-            # 构造完整的SMPL格式姿态数据 [n, 24, 3, 3]
-            poses = np.array(rotation_matrices).reshape(1, 24, 3, 3)
+            # 处理全局旋转的情况
+            if is_Global:
+                # 参考net.py中_reduced_glb_6d_to_full_local_mat函数处理全局旋转的方式
+                # 构造完整的全局旋转矩阵 [n, 24, 3, 3]
+                global_full_pose = np.array(rotation_matrices).reshape(1, 24, 3, 3)
+                
+                # 保存根关节旋转（第一个关节）
+                root_rotation = global_full_pose[:, 0].copy()
+                
+                # 转换为torch tensor进行处理
+                global_full_pose_tensor = torch.from_numpy(global_full_pose).float()
+                root_rotation_tensor = torch.from_numpy(root_rotation).float()
+                
+                # 使用inverse_kinematics_R转换为本地旋转
+                # 展开inverse_kinematics_R函数的实现
+                # 这部分相当于 body_model.inverse_kinematics_R(global_full_pose_tensor)
+                R_global = global_full_pose_tensor.view(global_full_pose_tensor.shape[0], -1, 3, 3)
+                
+                # 获取SMPL模型的父关节关系
+                body_model = art.ParametricModel(paths.smpl_file)
+                parent = body_model.parent
+                
+                # 实现inverse_kinematics_R的核心逻辑
+                # R_local[:, i] = R_global[:, parent[i]].transpose() @ R_global[:, i]
+                R_local = [R_global[:, 0]]  # 根关节的本地旋转等于其全局旋转
+                for i in range(1, len(parent)):
+                    # 计算本地旋转: R_local = R_parent^T * R_global
+                    parent_idx = parent[i]
+                    if parent_idx is None or parent_idx < 0:
+                        # 根关节或基关节
+                        R_local.append(R_global[:, i])
+                    else:
+                        # 其他关节: 本地旋转 = 父关节全局旋转的转置 @ 当前关节全局旋转
+                        R_parent_T = R_global[:, parent_idx].transpose(-1, -2)
+                        R_local_i = torch.matmul(R_parent_T, R_global[:, i])
+                        R_local.append(R_local_i)
+                
+                # 堆叠为张量
+                pose_tensor = torch.stack(R_local, dim=1)
+                pose_tensor = pose_tensor.view(-1, 24, 3, 3)
+                
+                # 恢复根关节旋转（参考net.py的处理方式）
+                pose_tensor[:, 0] = root_rotation_tensor.view(-1, 3, 3)
+                
+                # 转换回numpy数组
+                poses = pose_tensor.numpy()
+            else:
+                # 第一个矩阵是全局根关节旋转，其余23个是相对父关节的旋转
+                # 构造完整的SMPL格式姿态数据 [n, 24, 3, 3]
+                poses = np.array(rotation_matrices).reshape(1, 24, 3, 3)
             
             # 打印肩关节及手臂关节的旋转矩阵
             self.print_arm_rotation_matrices(poses[0])
@@ -356,7 +403,25 @@ class UnityConnector:
             q = smpl_to_rbdl(poses, np.array(tran_data))[0]
             
             # 打印转换后的RBDL关节角度
-            self.print_rbdl_joint_angles(q)
+            # self.print_rbdl_joint_angles(q)
+        elif len(pose_data) == 24 * 3:
+            # 新增分支：处理24*3的轴角数据
+            # 将轴角数据转换为旋转矩阵
+            import articulate as art
+            axis_angles = np.array(pose_data).reshape(24, 3)
+            # 使用与model.py中save_unity_motion相反的操作
+            # 将轴角转换为旋转矩阵
+            rotation_matrices = []
+            for i in range(24):
+                # 将单个轴角向量转换为旋转矩阵
+                matrix = art.math.axis_angle_to_rotation_matrix(torch.from_numpy(axis_angles[i:i+1])).view(3, 3)
+                rotation_matrices.append(matrix.numpy())
+            
+            # 构造完整的SMPL格式姿态数据 [n, 24, 3, 3]
+            poses = np.array(rotation_matrices).reshape(1, 24, 3, 3)
+            
+            # 转换为RBDL格式的关节角度
+            q = smpl_to_rbdl(poses, np.array(tran_data))[0]
         else:
             # 兼容旧的72个值格式(轴角表示)
             q = np.concatenate([tran_data, pose_data])
@@ -419,6 +484,7 @@ class UnityConnector:
 # 使用示例
 if __name__ == "__main__":
     # 创建连接器实例
+    is_global = False
     connector = UnityConnector()
     connector.init_pybullet_visualization()
     # 检查命令行参数，如果提供了test参数则运行测试姿态
@@ -439,7 +505,7 @@ if __name__ == "__main__":
                         pose, tran, cj, grf = received
                         print(f"接收到数据: pose长度={len(pose)}, tran长度={len(tran)}")
                         # 调用PyBullet进行可视化
-                        connector.update_visualization(pose, tran)
+                        connector.update_visualization(pose, tran, is_global)
                     else:
                         # 如果没有接收到数据，使用测试数据进行可视化
                         # T-pose测试数据

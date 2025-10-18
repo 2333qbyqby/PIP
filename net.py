@@ -51,7 +51,9 @@ class PIP(torch.nn.Module):
         glb_reduced_pose = art.math.r6d_to_rotation_matrix(glb_reduced_pose).view(-1, joint_set.n_reduced, 3, 3)
         global_full_pose = torch.eye(3, device=glb_reduced_pose.device).repeat(glb_reduced_pose.shape[0], 24, 1, 1)
         global_full_pose[:, joint_set.reduced] = glb_reduced_pose
+        print('global_full_pose', global_full_pose.shape)
         pose = self.inverse_kinematics_R(global_full_pose).view(-1, 24, 3, 3)
+
         pose[:, joint_set.ignored] = torch.eye(3, device=pose.device)
         pose[:, 0] = root_rotation.view(-1, 3, 3)
         return pose

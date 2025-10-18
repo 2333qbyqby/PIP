@@ -239,7 +239,7 @@ class PhysicsOptimizer:
         if self.debug:
             # self.clock.tick(60)   # please install pygame
             set_pose(self.id_robot, q)
-            print("当前帧的全局姿态", q)
+            #print("当前帧的全局姿态", q)
             self.params = read_debug_param_values_from_bullet()
 
             if False:   # visualize GRF (no smoothing)
