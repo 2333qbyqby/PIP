@@ -310,7 +310,7 @@ class UnityConnector:
         # 设置默认相机位置（可选）
         p.resetDebugVisualizerCamera(
             cameraDistance=2.0,  # 相机距离
-            cameraYaw=45,  # 水平旋转角度
+            cameraYaw=0,  # 水平旋转角度，0表示正后方
             cameraPitch=-30,  # 垂直倾斜角度
             cameraTargetPosition=[0, 0, 0]  # 相机焦点位置
         )
@@ -358,7 +358,7 @@ class UnityConnector:
             left_map = [1,0,2]
             right_map = [1,0,2]
             # 应用自定义坐标轴映射到肩膀关节
-            poses[0] = self.apply_shoulder_axis_mapping(poses[0], left_map, right_map)
+            #poses[0] = self.apply_shoulder_axis_mapping(poses[0], left_map, right_map)
             
             # 打印肩关节及手臂关节的旋转矩阵
             #self.print_arm_rotation_matrices(poses[0])
