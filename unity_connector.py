@@ -20,6 +20,10 @@ from utils import set_pose, _rbdl_to_bullet
 import articulate as art
 import torch
 
+# 导入计算局部旋转的函数
+from compute_local_rotations import *
+
+
 
 class UnityConnector:
     """
@@ -218,7 +222,7 @@ class UnityConnector:
         
         # 分割数据的各个部分
         parts = data.split('#')
-        
+
         if len(parts) != 4:
             raise ValueError(f"数据格式错误：期望4个部分，实际收到{len(parts)}个部分")
         
@@ -332,23 +336,89 @@ class UnityConnector:
         更新可视化显示
         
         Args:
-            pose_data: 从Unity接收的姿态数据(216个值，表示24个3x3旋转矩阵)
-            tran_data: 位移数据
+            pose_data: 从Unity接收的姿态数据(216个值，表示24个3x3旋转矩阵)或全局关节位置(72个值)
+            tran_data: 位移数据 和 角色朝向
             cj_data: 接触关节数据
             grf_data: 地面反作用力数据
         """
+        # 检查是否是全局位置数据 (24个关节 * 3个坐标 = 72个值 + 根骨骼旋转矩阵)
+        if len(pose_data) == 72:
+            global_positions = np.array(pose_data).reshape(24, 3)
+            root_rotation_matrix = np.eye(3)
+            local_rotations = compute_local_rotations_from_relative_positions(global_positions)
+            poses = local_rotations.reshape(1, 24, 3, 3)
+            q = smpl_to_rbdl(poses, np.array(tran_data))[0]
+        if len(pose_data) == 81:
+            # 将72个值重塑为24个关节的全局位置 [24, 3]
+            global_positions = np.array(pose_data[0:72]).reshape(24, 3)
+            root_rotation_matrix = np.array(pose_data[72:81]).reshape(3, 3)
+            # 使用全局位置计算局部旋转矩阵
+            # 注意：这里我们暂时不传递根骨骼旋转信息，使用默认值
+            local_rotations = compute_local_rotations_from_global_positions(global_positions, root_rotation_matrix)
+            
+            # 构造完整的SMPL格式姿态数据 [1, 24, 3, 3]
+            poses = local_rotations.reshape(1, 24, 3, 3)
+            
+            # 转换为RBDL格式的关节角度
+            q = smpl_to_rbdl(poses, np.array(tran_data))[0]
         # 检查pose_data是否为216个值(24个关节的3x3矩阵)
-        if len(pose_data) == 216:
+        elif len(pose_data) == 216:
             # 将216个值转换为24个3x3矩阵
             rotation_matrices = []
             for i in range(24):
-                matrix = np.array(pose_data[i*9:(i+1)*9]).reshape(3, 3)
+                matrix = np.array(pose_data[i * 9:(i + 1) * 9]).reshape(3, 3)
                 rotation_matrices.append(matrix)
-            
-            # 第一个矩阵是全局根关节旋转，其余23个是相对父关节的旋转
-            # 构造完整的SMPL格式姿态数据 [n, 24, 3, 3]
-            poses = np.array(rotation_matrices).reshape(1, 24, 3, 3)
-            
+            # 处理全局旋转的情况
+            if is_Global:
+                # 参考net.py中_reduced_glb_6d_to_full_local_mat函数处理全局旋转的方式
+                # 构造完整的全局旋转矩阵 [n, 24, 3, 3]
+                global_full_pose = np.array(rotation_matrices).reshape(1, 24, 3, 3)
+
+                # 保存根关节旋转（第一个关节）
+                root_rotation = global_full_pose[:, 0].copy()
+
+                # 转换为torch tensor进行处理
+                global_full_pose_tensor = torch.from_numpy(global_full_pose).float()
+                root_rotation_tensor = torch.from_numpy(root_rotation).float()
+
+                # 使用inverse_kinematics_R转换为本地旋转
+                # 展开inverse_kinematics_R函数的实现
+                # 这部分相当于 body_model.inverse_kinematics_R(global_full_pose_tensor)
+                R_global = global_full_pose_tensor.view(global_full_pose_tensor.shape[0], -1, 3, 3)
+
+                # 获取SMPL模型的父关节关系
+                body_model = art.ParametricModel(paths.smpl_file)
+                parent = body_model.parent
+
+                # 实现inverse_kinematics_R的核心逻辑
+                # R_local[:, i] = R_global[:, parent[i]].transpose() @ R_global[:, i]
+                R_local = [R_global[:, 0]]  # 根关节的本地旋转等于其全局旋转
+                for i in range(1, len(parent)):
+                    # 计算本地旋转: R_local = R_parent^T * R_global
+                    parent_idx = parent[i]
+                    if parent_idx is None or parent_idx < 0:
+                        # 根关节或基关节
+                        R_local.append(R_global[:, i])
+                    else:
+                        # 其他关节: 本地旋转 = 父关节全局旋转的转置 @ 当前关节全局旋转
+                        R_parent_T = R_global[:, parent_idx].transpose(-1, -2)
+                        R_local_i = torch.matmul(R_parent_T, R_global[:, i])
+                        R_local.append(R_local_i)
+
+                # 堆叠为张量
+                pose_tensor = torch.stack(R_local, dim=1)
+                pose_tensor = pose_tensor.view(-1, 24, 3, 3)
+
+                # 恢复根关节旋转（参考net.py的处理方式）
+                pose_tensor[:, 0] = root_rotation_tensor.view(-1, 3, 3)
+
+                # 转换回numpy数组
+                poses = pose_tensor.numpy()
+
+            else:
+                # 第一个矩阵是全局根关节旋转，其余23个是相对父关节的旋转
+                # 构造完整的SMPL格式姿态数据 [n, 24, 3, 3]
+                poses = np.array(rotation_matrices).reshape(1, 24, 3, 3)
             # # 对左肩关节(索引16)的旋转矩阵取反
             # # 创建绕Y轴180度的旋转矩阵来实现取反效果
             # rotation_180_y = np.array([[-1, 0, 0],
@@ -375,6 +445,7 @@ class UnityConnector:
         
         # 应用姿态到机器人
         set_pose(self.id_robot, q)
+        print(q)
 
     def apply_shoulder_axis_mapping(self, poses, left_mapping=None, right_mapping=None):
         """
@@ -535,58 +606,6 @@ class UnityConnector:
         print(f"  {right_shoulder_rotation[2]}")
         
         print("=" * 50)
-
-    def add_shoulder_rotation(self, poses, left_rotation=None, right_rotation=None):
-        """
-        对肩膀关节添加额外的旋转
-        
-        Args:
-            poses: SMPL格式的姿态数据 [24, 3, 3]
-            left_rotation: 左肩额外旋转的欧拉角 (ZYX顺序) [3] 或旋转矩阵 [3, 3]
-            right_rotation: 右肩额外旋转的欧拉角 (ZYX顺序) [3] 或旋转矩阵 [3, 3]
-            
-        Returns:
-            修改后的姿态数据 [24, 3, 3]
-        """
-        import articulate as art
-        import numpy as np
-        
-        # 复制输入数据以避免修改原始数据
-        modified_poses = poses.copy()
-        
-        # 处理左肩旋转
-        if left_rotation is not None:
-            if isinstance(left_rotation, (list, tuple)):
-                left_rotation = np.array(left_rotation)
-                
-            # 如果输入是欧拉角，则转换为旋转矩阵
-            if left_rotation.shape == (3,):
-                left_rotation_matrix = art.math.euler_angle_to_rotation_matrix_np(left_rotation, 'ZYX')
-            elif left_rotation.shape == (3, 3):
-                left_rotation_matrix = left_rotation
-            else:
-                raise ValueError("左肩旋转参数必须是形状为(3,)的欧拉角或形状为(3,3)的旋转矩阵")
-            
-            # 将额外旋转应用到左肩（矩阵相乘）
-            modified_poses[16] = np.dot(left_rotation_matrix, modified_poses[16])
-        
-        # 处理右肩旋转
-        if right_rotation is not None:
-            if isinstance(right_rotation, (list, tuple)):
-                right_rotation = np.array(right_rotation)
-                
-            # 如果输入是欧拉角，则转换为旋转矩阵
-            if right_rotation.shape == (3,):
-                right_rotation_matrix = art.math.euler_angle_to_rotation_matrix_np(right_rotation, 'ZYX')
-            elif right_rotation.shape == (3, 3):
-                right_rotation_matrix = right_rotation
-            else:
-                raise ValueError("右肩旋转参数必须是形状为(3,)的欧拉角或形状为(3,3)的旋转矩阵")
-            
-            # 将额外旋转应用到右肩（矩阵相乘）
-            modified_poses[17] = np.dot(right_rotation_matrix, modified_poses[17])
-        
-        return modified_poses
 
 # 使用示例
 if __name__ == "__main__":
