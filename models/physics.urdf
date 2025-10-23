@@ -1091,7 +1091,7 @@
 		<parent link = "spine_4_rz" />
 		<child link = "right_clavicle_rx" />
 		<limit effort="1000.0" lower= "-2.5" upper= "2.5" velocity="0.5" />
-		<origin rpy = "0 3.14 0" xyz ="-0.02371300000000001 -0.08099875 0.1105722"  />
+		<origin rpy = "0 0 0" xyz ="-0.02371300000000001 -0.08099875 0.1105722"  />
 		<axis xyz = "0.0 1.0 0.0" />
 	</joint>
 	<link name = "right_clavicle_ry">
