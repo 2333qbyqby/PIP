@@ -18,11 +18,6 @@ sys.path.append(str(project_root))
 from config import paths
 from utils import set_pose, _rbdl_to_bullet
 import articulate as art
-import torch
-
-# 导入计算局部旋转的函数
-from compute_local_rotations import *
-
 
 
 class UnityConnector:
@@ -30,13 +25,14 @@ class UnityConnector:
     Unity连接器，用于与Unity进行双向通信
     """
 
-    def __init__(self, host='127.0.0.1', port=8888):
+    def __init__(self, host='127.0.0.1', port=8888, max_receive_queue_size=100):
         """
         初始化Unity连接器
         
         Args:
             host: 服务器地址
             port: 服务器端口
+            max_receive_queue_size: 接收队列最大大小，防止数据积压
         """
         self.host = host
         self.port = port
@@ -46,6 +42,8 @@ class UnityConnector:
         # 队列用于存储待发送的数据和已接收的数据
         self.send_queue = queue.Queue()
         self.receive_queue = queue.Queue()
+        self.max_receive_queue_size = max_receive_queue_size  # 最大队列大小
+        self.receive_queue_dropped_count = 0  # 丢弃的数据包计数
         
         # 线程控制
         self.send_thread = None
@@ -159,6 +157,16 @@ class UnityConnector:
                     if message:
                         try:
                             parsed_data = self._parse_unity_data(message + '$')
+                            # 检查队列大小，防止积压过多数据
+                            if self.receive_queue.qsize() >= self.max_receive_queue_size:
+                                # 队列已满，丢弃最旧的数据
+                                try:
+                                    self.receive_queue.get_nowait()
+                                    self.receive_queue_dropped_count += 1
+                                    if self.receive_queue_dropped_count % 10 == 1:  # 每10次丢弃打印一次日志
+                                        print(f"警告: 接收队列已满，已丢弃 {self.receive_queue_dropped_count} 个数据包")
+                                except queue.Empty:
+                                    pass
                             self.receive_queue.put(parsed_data)
                         except ValueError as e:
                             print(f"数据解析错误: {e}")
@@ -362,6 +370,20 @@ class UnityConnector:
         
         # 应用姿态到机器人
         set_pose(self.id_robot, q)
+
+    def get_receive_queue_info(self):
+        """
+        获取接收队列信息
+        
+        Returns:
+            dict: 包含队列大小、最大容量和丢弃计数的信息
+        """
+        return {
+            'queue_size': self.receive_queue.qsize(),
+            'max_size': self.max_receive_queue_size,
+            'dropped_count': self.receive_queue_dropped_count
+        }
+
 # 使用示例
 if __name__ == "__main__":
     # 创建连接器实例
