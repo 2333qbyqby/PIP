@@ -329,7 +329,7 @@ class UnityConnector:
         p.loadURDF(paths.plane_file, [0, 0.881, 0.0], [0, 0, 0, 1])
         load_debug_params_into_bullet_from_json(paths.physics_parameter_file)
 
-    def update_visualization(self, pose_data: List[float], tran_data: List[float], is_Global: bool = False,
+    def update_visualization(self, pose_data: List[float], tran_data: List[float],
                             cj_data: Optional[List[int]] = None,
                             grf_data: Optional[List[float]] = None):
         """
@@ -384,7 +384,6 @@ class UnityConnector:
 # 使用示例
 if __name__ == "__main__":
     # 创建连接器实例
-    is_global = False
     connector = UnityConnector()
     connector.init_pybullet_visualization()
     # 检查命令行参数，如果提供了test参数则运行测试姿态
@@ -405,7 +404,7 @@ if __name__ == "__main__":
                         pose, tran, cj, grf = received
                         print(f"接收到数据: pose长度={len(pose)}, tran长度={len(tran)}")
                         # 调用PyBullet进行可视化
-                        connector.update_visualization(pose, tran, is_global)
+                        connector.update_visualization(pose, tran)
                     else:
                         # 如果没有接收到数据，使用测试数据进行可视化
                         # T-pose测试数据
