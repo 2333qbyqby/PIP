@@ -341,28 +341,9 @@ class UnityConnector:
             cj_data: 接触关节数据
             grf_data: 地面反作用力数据
         """
-        # 检查是否是全局位置数据 (24个关节 * 3个坐标 = 72个值 + 根骨骼旋转矩阵)
-        if len(pose_data) == 72:
-            global_positions = np.array(pose_data).reshape(24, 3)
-            root_rotation_matrix = np.eye(3)
-            local_rotations = compute_local_rotations_from_relative_positions(global_positions)
-            poses = local_rotations.reshape(1, 24, 3, 3)
-            q = smpl_to_rbdl(poses, np.array(tran_data))[0]
-        if len(pose_data) == 81:
-            # 将72个值重塑为24个关节的全局位置 [24, 3]
-            global_positions = np.array(pose_data[0:72]).reshape(24, 3)
-            root_rotation_matrix = np.array(pose_data[72:81]).reshape(3, 3)
-            # 使用全局位置计算局部旋转矩阵
-            # 注意：这里我们暂时不传递根骨骼旋转信息，使用默认值
-            local_rotations = compute_local_rotations_from_global_positions(global_positions, root_rotation_matrix)
-            
-            # 构造完整的SMPL格式姿态数据 [1, 24, 3, 3]
-            poses = local_rotations.reshape(1, 24, 3, 3)
-            
-            # 转换为RBDL格式的关节角度
-            q = smpl_to_rbdl(poses, np.array(tran_data))[0]
+
         # 检查pose_data是否为216个值(24个关节的3x3矩阵)
-        elif len(pose_data) == 216:
+        if len(pose_data) == 216:
             # 将216个值转换为24个3x3矩阵
             rotation_matrices = []
             for i in range(24):
@@ -411,10 +392,8 @@ if __name__ == "__main__":
                         test_pose = [0.0] * 72  # T-pose，所有关节角度为0
                         test_tran = [0.0, 0.0, 0.0]  # 根位置在原点
                         #connector.visualize_data(test_pose, test_tran)
-                    
                     frame_count += 1
                     time.sleep(1/60)  # 60 FPS
-                    
             except KeyboardInterrupt:
                 print("\n停止通信")
             finally:
