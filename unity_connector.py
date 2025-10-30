@@ -57,6 +57,9 @@ class UnityConnector:
         
         # SMPL模型用于骨架可视化
         self.smpl_model = art.ParametricModel(paths.smpl_file)
+        
+        # Physics Optimizer用于物理优化
+        self.physics_optimizer = None
 
     def connect_as_server(self) -> bool:
         """
@@ -242,13 +245,13 @@ class UnityConnector:
         # 解析位移数据 (tran_data)
         tran_data = [float(x) for x in tran_str.split(',')] if tran_str else []
         
-        # 解析接触关节数据 (cj_data)
+        # 解析接触数据 (cj_data)
         cj_data = [int(x) for x in cj_str.split(',')] if cj_str else []
         
         # 解析地面反作用力数据 (grf_data)
-        grf_data = [float(x) for x in grf_str.split(',')] if grf_str else []
+        velocity_data = [float(x) for x in grf_str.split(',')] if grf_str else []
         
-        return pose_data, tran_data, cj_data, grf_data
+        return pose_data, tran_data, cj_data, velocity_data
 
     def send_data(self, pose_data: List[float], tran_data: List[float], 
                   cj_data: Optional[List[int]] = None, 
@@ -360,14 +363,10 @@ class UnityConnector:
             poses = np.array(rotation_matrices).reshape(1, 24, 3, 3)
             # 转换为RBDL格式的关节角度
             q = smpl_to_rbdl(poses, np.array(tran_data))[0]
-            
-            # 打印转换后的RBDL关节角度
-            # self.print_rbdl_joint_angles(q)
-            # 打印肩关节欧拉角
         else:
             # 兼容旧的72个值格式(轴角表示)
             q = np.concatenate([tran_data, pose_data])
-        
+
         # 应用姿态到机器人
         set_pose(self.id_robot, q)
 
@@ -384,11 +383,55 @@ class UnityConnector:
             'dropped_count': self.receive_queue_dropped_count
         }
 
+    def init_physics_optimizer(self, debug=False):
+        """
+        初始化物理优化器
+        
+        Args:
+            debug: 是否启用调试模式
+        """
+        from dynamics import PhysicsOptimizer
+        self.physics_optimizer = PhysicsOptimizer(debug=debug)
+
+    def optimize_frame_with_physics(self, pose_data: List[float], jvel: List[float], contact: List[int], acc: List[float] = None):
+        """
+        使用物理优化器优化单帧数据
+        
+        Args:
+            pose: 姿态数据
+            jvel: 关节速度数据
+            contact: 接触信息数据
+            acc: 加速度数据
+            
+        Returns:
+            tuple: (优化后的姿态, 优化后的位移)
+        """
+        poses = np.array([])
+        velocitys = np.array([])
+        contacts = np.array([0, 0])  # 默认值，表示没有接触
+        # 检查pose_data是否为216个值(24个关节的3x3矩阵)
+        if len(pose_data) == 216:
+            # 将216个值转换为24个3x3矩阵
+            rotation_matrices = []
+            for i in range(24):
+                matrix = np.array(pose_data[i * 9:(i + 1) * 9]).reshape(3, 3)
+                rotation_matrices.append(matrix)
+            poses = np.array(rotation_matrices).reshape(1, 24, 3, 3)
+        if len(jvel) == 72:
+            velocitys = np.array(jvel).reshape(24, 3)
+        if len(contact) == 2 :
+            contacts = np.array(contact).reshape(2)
+        if self.physics_optimizer is None:
+            raise RuntimeError("Physics optimizer not initialized. Call init_physics_optimizer() first.")
+        
+        return self.physics_optimizer.optimize_frame(poses, velocitys, contacts, acc)
+
 # 使用示例
 if __name__ == "__main__":
     # 创建连接器实例
     connector = UnityConnector()
-    connector.init_pybullet_visualization()
+    #connector.init_pybullet_visualization()
+    connector.init_physics_optimizer(True)
     # 检查命令行参数，如果提供了test参数则运行测试姿态
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "test":
@@ -404,10 +447,11 @@ if __name__ == "__main__":
                     # 接收数据并进行可视化处理
                     received = connector.receive_data(timeout=0.01)  # 非阻塞检查
                     if received:
-                        pose, tran, cj, grf = received
+                        pose, tran, cj, velocity = received
                         print(f"接收到数据: pose长度={len(pose)}, tran长度={len(tran)}")
                         # 调用PyBullet进行可视化
-                        connector.update_visualization(pose, tran)
+                        #connector.update_visualization(pose, tran, )
+                        connector.optimize_frame_with_physics(pose, velocity, cj)
                     else:
                         # 如果没有接收到数据，使用测试数据进行可视化
                         # T-pose测试数据

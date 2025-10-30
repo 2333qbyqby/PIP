@@ -51,9 +51,9 @@ class PhysicsOptimizer:
 
     def optimize_frame(self, pose, jvel, contact, acc):
         q_ref = smpl_to_rbdl(pose, torch.zeros(3))[0]  # 神经网络预测的姿态
-        v_ref = jvel.numpy()                           # 神经网络预测的关节速度
-        c_ref = contact.sigmoid().numpy()              # 神经网络预测的接触信息
-        a_ref = acc.numpy()                            # IMU传感器测量的加速度
+        v_ref = jvel if isinstance(jvel, np.ndarray) else jvel.numpy()  # 神经网络预测的关节速度
+        c_ref = contact.sigmoid().numpy() if isinstance(contact, torch.Tensor) else np.array(contact)  # 神经网络预测的接触信息
+        a_ref = acc.numpy() if isinstance(acc, torch.Tensor) else np.array(acc)   # IMU传感器测量的加速度
         q = self.q
         qdot = self.qdot
 
