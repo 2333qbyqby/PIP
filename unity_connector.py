@@ -424,6 +424,12 @@ class UnityConnector:
         if self.physics_optimizer is None:
             raise RuntimeError("Physics optimizer not initialized. Call init_physics_optimizer() first.")
         
+        # 添加调试信息
+        print("=== UnityConnector Debug Info ===")
+        print(f"poses shape: {poses.shape if hasattr(poses, 'shape') else 'N/A'}")
+        print(f"velocitys shape: {velocitys.shape if hasattr(velocitys, 'shape') else 'N/A'}")
+        print(f"contacts: {contacts}")
+        print(f"acc: {acc}")
         return self.physics_optimizer.optimize_frame(poses, velocitys, contacts, acc)
 
 # 使用示例
