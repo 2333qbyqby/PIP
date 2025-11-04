@@ -50,7 +50,6 @@ class PhysicsOptimizer:
         self.qdot = np.zeros(self.model.qdot_size)
 
     def optimize_frame(self, pose, jvel, contact, acc):
-        print(f"velocitys values: {jvel}")
         q_ref = smpl_to_rbdl(pose, torch.zeros(3))[0]  # 神经网络预测的姿态
         v_ref = jvel if isinstance(jvel, np.ndarray) else jvel.numpy()  # 神经网络预测的关节速度
         c_ref = contact.sigmoid().numpy() if isinstance(contact, torch.Tensor) else np.array(contact)  # 神经网络预测的接触信息
@@ -225,31 +224,31 @@ class PhysicsOptimizer:
         # fast solvers are less accurate/robust, and may fail
         init = self.last_x if len(self.last_x) == len(q_) else None
         
-        # 添加调试输出
-        if self.debug:
-            print("Debugging QP matrices:")
-            print(f"P_ shape: {P_.shape}, P_ dtype: {P_.dtype}")
-            print(f"q_ shape: {q_.shape}, q_ dtype: {q_.dtype}")
-            print(f"G_ shape: {G_.shape}, G_ dtype: {G_.dtype}")
-            print(f"h_ shape: {h_.shape}, h_ dtype: {h_.dtype}")
-            print(f"A_ shape: {A_.shape}, A_ dtype: {A_.dtype}")
-            print(f"b_ shape: {b_.shape}, b_ dtype: {b_.dtype}")
-            
-            # 检查是否有 NaN 或无穷大值
-            print(f"P_ has NaN: {np.isnan(P_).any()}, P_ has Inf: {np.isinf(P_).any()}")
-            print(f"q_ has NaN: {np.isnan(q_).any()}, q_ has Inf: {np.isinf(q_).any()}")
-            print(f"G_ has NaN: {np.isnan(G_).any()}, G_ has Inf: {np.isinf(G_).any()}")
-            print(f"h_ has NaN: {np.isnan(h_).any()}, h_ has Inf: {np.isinf(h_).any()}")
-            print(f"A_ has NaN: {np.isnan(A_).any()}, A_ has Inf: {np.isinf(A_).any()}")
-            print(f"b_ has NaN: {np.isnan(b_).any()}, b_ has Inf: {np.isinf(b_).any()}")
-            
-            # 检查矩阵是否为负或零
-            if P_.shape[0] > 0 and P_.shape[1] > 0:
-                eigenvals = np.linalg.eigvals(P_)
-                print(f"P_ min eigenvalue: {np.min(eigenvals)}, max eigenvalue: {np.max(eigenvals)}")
-            
-            if init is not None:
-                print(f"init shape: {init.shape}, init has NaN: {np.isnan(init).any()}, init has Inf: {np.isinf(init).any()}")
+        # # 添加调试输出
+        # if self.debug:
+        #     print("Debugging QP matrices:")
+        #     print(f"P_ shape: {P_.shape}, P_ dtype: {P_.dtype}")
+        #     print(f"q_ shape: {q_.shape}, q_ dtype: {q_.dtype}")
+        #     print(f"G_ shape: {G_.shape}, G_ dtype: {G_.dtype}")
+        #     print(f"h_ shape: {h_.shape}, h_ dtype: {h_.dtype}")
+        #     print(f"A_ shape: {A_.shape}, A_ dtype: {A_.dtype}")
+        #     print(f"b_ shape: {b_.shape}, b_ dtype: {b_.dtype}")
+        #
+        #     # 检查是否有 NaN 或无穷大值
+        #     print(f"P_ has NaN: {np.isnan(P_).any()}, P_ has Inf: {np.isinf(P_).any()}")
+        #     print(f"q_ has NaN: {np.isnan(q_).any()}, q_ has Inf: {np.isinf(q_).any()}")
+        #     print(f"G_ has NaN: {np.isnan(G_).any()}, G_ has Inf: {np.isinf(G_).any()}")
+        #     print(f"h_ has NaN: {np.isnan(h_).any()}, h_ has Inf: {np.isinf(h_).any()}")
+        #     print(f"A_ has NaN: {np.isnan(A_).any()}, A_ has Inf: {np.isinf(A_).any()}")
+        #     print(f"b_ has NaN: {np.isnan(b_).any()}, b_ has Inf: {np.isinf(b_).any()}")
+        #
+        #     # 检查矩阵是否为负或零
+        #     if P_.shape[0] > 0 and P_.shape[1] > 0:
+        #         eigenvals = np.linalg.eigvals(P_)
+        #         print(f"P_ min eigenvalue: {np.min(eigenvals)}, max eigenvalue: {np.max(eigenvals)}")
+        #
+        #     if init is not None:
+        #         print(f"init shape: {init.shape}, init has NaN: {np.isnan(init).any()}, init has Inf: {np.isinf(init).any()}")
         
         x = solve_qp(P_, q_, G_, h_, A_, b_, solver='quadprog', initvals=init)
 

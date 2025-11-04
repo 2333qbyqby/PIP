@@ -151,7 +151,7 @@ def axis_angle_to_rotation_matrix(a: torch.Tensor):
     return r
 
 
-def rotation_matrix_to_axis_angle(r: torch.Tensor):
+def rotation_matrix_to_axis_angle(r):
     r"""
     Turn rotation matrices into axis-angles. (torch, batch)
 
@@ -159,8 +159,24 @@ def rotation_matrix_to_axis_angle(r: torch.Tensor):
     :return: Axis-angle tensor of shape [batch_size, 3].
     """
     import cv2
-    result = [cv2.Rodrigues(_)[0] for _ in r.clone().detach().cpu().view(-1, 3, 3).numpy()]
-    result = torch.from_numpy(np.stack(result)).float().squeeze(-1).to(r.device)
+    
+    # Check if input is a numpy array and convert to torch tensor if needed
+    if isinstance(r, np.ndarray):
+        is_numpy = True
+        device = None
+        r_torch = torch.from_numpy(r)
+    else:
+        is_numpy = False
+        device = r.device
+        r_torch = r
+    
+    result = [cv2.Rodrigues(_)[0] for _ in r_torch.clone().detach().cpu().view(-1, 3, 3).numpy()]
+    result = torch.from_numpy(np.stack(result)).float().squeeze(-1)
+    
+    # Move result back to original device if it was a torch tensor
+    if not is_numpy:
+        result = result.to(device)
+    
     return result
 
 

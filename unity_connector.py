@@ -127,7 +127,10 @@ class UnityConnector:
                     continue
                     
                 pose_data, tran_data, cj_data, grf_data = data
-                success = self._send_motion_data(pose_data, tran_data, cj_data, grf_data)
+                # 使用_pack_unity_data函数封装数据
+                message = self._pack_unity_data(pose_data, tran_data, cj_data, grf_data)
+                # 发送封装好的数据
+                success = self._send_message(message)
                 if not success:
                     print("发送数据失败")
                     self._handle_disconnect()
@@ -138,6 +141,23 @@ class UnityConnector:
                 print(f"发送数据时出错: {e}")
                 self._handle_disconnect()
                 break
+
+    def _send_message(self, message: str) -> bool:
+        """
+        发送消息到Unity
+        
+        Args:
+            message: 要发送的消息字符串
+            
+        Returns:
+            bool: 发送是否成功
+        """
+        try:
+            self.connection.send(message.encode('utf8'))
+            return True
+        except Exception as e:
+            print(f"发送消息失败: {e}")
+            return False
 
     def _receive_loop(self):
         """
@@ -187,11 +207,11 @@ class UnityConnector:
             self.running = False
             self.close()
 
-    def _send_motion_data(self, pose_data: List[float], tran_data: List[float], 
+    def _pack_unity_data(self, pose_data: List[float], tran_data: List[float], 
                          cj_data: Optional[List[int]] = None, 
-                         grf_data: Optional[List[float]] = None) -> bool:
+                         grf_data: Optional[List[float]] = None) -> str:
         """
-        发送动作数据到Unity
+        封装发送到Unity的数据
         
         Args:
             pose_data: 姿态数据
@@ -200,23 +220,16 @@ class UnityConnector:
             grf_data: 地面反作用力数据
             
         Returns:
-            bool: 发送是否成功
+            str: 封装后的数据字符串
         """
-        try:
-            # 格式化数据
-            pose_str = ','.join(['%g' % v for v in pose_data])
-            tran_str = ','.join(['%g' % v for v in tran_data])
-            cj_str = ','.join(['%d' % v for v in cj_data]) if cj_data else ''
-            grf_str = ','.join(['%g' % v for v in grf_data]) if grf_data else ''
-            
-            # 构造消息字符串
-            message = f"{pose_str}#{tran_str}#{cj_str}#{grf_str}$"
-            
-            self.connection.send(message.encode('utf8'))
-            return True
-        except Exception as e:
-            print(f"发送数据失败: {e}")
-            return False
+        # 格式化数据，确保将numpy数组转换为Python标量
+        pose_str = ','.join(['%g' % float(v) for v in pose_data])
+        tran_str = ','.join(['%g' % float(v) for v in tran_data])
+        grf_str = ','.join(['%g' % float(v) for v in grf_data]) if grf_data else ''
+        
+        # 构造消息字符串
+        message = f"{pose_str}#{tran_str}#{grf_str}$"
+        return message
 
     def _parse_unity_data(self, data: str) -> Tuple[List[float], List[float], List[int], List[float]]:
         """
@@ -247,7 +260,7 @@ class UnityConnector:
         
         # 解析接触数据 (cj_data)
         cj_data = [int(x) for x in cj_str.split(',')] if cj_str else []
-        
+
         # 解析地面反作用力数据 (grf_data)
         velocity_data = [float(x) for x in grf_str.split(',')] if grf_str else []
         
@@ -429,7 +442,6 @@ class UnityConnector:
         print(f"poses shape: {poses.shape if hasattr(poses, 'shape') else 'N/A'}")
         print(f"velocitys shape: {velocitys.shape if hasattr(velocitys, 'shape') else 'N/A'}")
         print(f"contacts: {contacts}")
-        print(f"acc: {acc}")
         return self.physics_optimizer.optimize_frame(poses, velocitys, contacts, acc)
 
 # 使用示例
@@ -457,7 +469,13 @@ if __name__ == "__main__":
                         print(f"接收到数据: pose长度={len(pose)}, tran长度={len(tran)}")
                         # 调用PyBullet进行可视化
                         #connector.update_visualization(pose, tran, )
-                        connector.optimize_frame_with_physics(pose, velocity, cj)
+                        result = connector.optimize_frame_with_physics(pose, velocity, cj)
+                        # 将result加入发送队列，并将结果发送给Unity
+                        # 展开姿态数据为一维列表
+                        pose_data = art.math.rotation_matrix_to_axis_angle(result[0]).flatten().tolist()
+                        print(pose_data.__len__())
+                        tran_data = result[1].tolist()
+                        connector.send_data(pose_data, tran_data)
                     else:
                         # 如果没有接收到数据，使用测试数据进行可视化
                         # T-pose测试数据
