@@ -261,6 +261,11 @@ class PhysicsOptimizer:
         GRF = x[self.model.qdot_size:-self.model.qdot_size]
         tau = x[-self.model.qdot_size:]
 
+        # 添加调试信息，打印 tau 和 GRF 的形状
+        if self.debug:
+            print(f"tau shape: {tau.shape}")
+            print(f"GRF shape: {GRF.shape}")
+
         qdot = qdot + qddot * self.params['delta_t']
         q = q + qdot * self.params['delta_t']
         self.q = q
@@ -273,12 +278,12 @@ class PhysicsOptimizer:
             #print("当前帧的全局姿态", q)
             self.params = read_debug_param_values_from_bullet()
 
-            if False:   # visualize GRF (no smoothing)
-                p.removeAllUserDebugItems()
-                for point, force in zip(collision_points, GRF.reshape(-1, 3)):
-                    p.addUserDebugLine(point, point + force * 1e-2, [1, 0, 0])
+            #if False:   # visualize GRF (no smoothing)
+            # p.removeAllUserDebugItems()
+            # for point, force in zip(collision_points, GRF.reshape(-1, 3)):
+            #     p.addUserDebugLine(point, point + force * 1e-2, [1, 0, 0])
 
         pose_opt, tran_opt = rbdl_to_smpl(q)
         pose_opt = torch.from_numpy(pose_opt).float()[0]
         tran_opt = torch.from_numpy(tran_opt).float()[0]
-        return pose_opt, tran_opt
+        return pose_opt, tran_opt, GRF

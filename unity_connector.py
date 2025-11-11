@@ -126,9 +126,9 @@ class UnityConnector:
                 if data is None:
                     continue
                     
-                pose_data, tran_data, cj_data, grf_data = data
+                pose_data, tran_data, grf_data, cj_data= data
                 # 使用_pack_unity_data函数封装数据
-                message = self._pack_unity_data(pose_data, tran_data, cj_data, grf_data)
+                message = self._pack_unity_data(pose_data, tran_data,grf_data,cj_data)
                 # 发送封装好的数据
                 success = self._send_message(message)
                 if not success:
@@ -207,9 +207,9 @@ class UnityConnector:
             self.running = False
             self.close()
 
-    def _pack_unity_data(self, pose_data: List[float], tran_data: List[float], 
-                         cj_data: Optional[List[int]] = None, 
-                         grf_data: Optional[List[float]] = None) -> str:
+    def _pack_unity_data(self, pose_data: List[float], tran_data: List[float],
+                         grf_data: Optional[List[float]] = None,
+                         cj_data: Optional[List[int]] = None) -> str:
         """
         封装发送到Unity的数据
         
@@ -226,7 +226,7 @@ class UnityConnector:
         pose_str = ','.join(['%g' % float(v) for v in pose_data])
         tran_str = ','.join(['%g' % float(v) for v in tran_data])
         grf_str = ','.join(['%g' % float(v) for v in grf_data]) if grf_data else ''
-        
+        print(grf_data)
         # 构造消息字符串
         message = f"{pose_str}#{tran_str}#{grf_str}$"
         return message
@@ -266,19 +266,19 @@ class UnityConnector:
         
         return pose_data, tran_data, cj_data, velocity_data
 
-    def send_data(self, pose_data: List[float], tran_data: List[float], 
-                  cj_data: Optional[List[int]] = None, 
-                  grf_data: Optional[List[float]] = None):
+    def send_data(self, pose_data: List[float], tran_data: List[float],
+                grf_data:List[float],
+                cj_data: Optional[List[int]] = None):
         """
         将数据添加到发送队列
         
         Args:
             pose_data: 姿态数据
             tran_data: 位移数据
-            cj_data: 接触关节数据
             grf_data: 地面反作用力数据
+            cj_data: 接触关节数据
         """
-        self.send_queue.put((pose_data, tran_data, cj_data, grf_data))
+        self.send_queue.put((pose_data, tran_data, grf_data, cj_data))
 
     def receive_data(self, timeout: Optional[float] = None) -> Optional[Tuple]:
         """
@@ -438,10 +438,10 @@ class UnityConnector:
             raise RuntimeError("Physics optimizer not initialized. Call init_physics_optimizer() first.")
         
         # 添加调试信息
-        print("=== UnityConnector Debug Info ===")
-        print(f"poses shape: {poses.shape if hasattr(poses, 'shape') else 'N/A'}")
-        print(f"velocitys shape: {velocitys.shape if hasattr(velocitys, 'shape') else 'N/A'}")
-        print(f"contacts: {contacts}")
+        # print("=== UnityConnector Debug Info ===")
+        # print(f"poses shape: {poses.shape if hasattr(poses, 'shape') else 'N/A'}")
+        # print(f"velocitys shape: {velocitys.shape if hasattr(velocitys, 'shape') else 'N/A'}")
+        # print(f"contacts: {contacts}")
         return self.physics_optimizer.optimize_frame(poses, velocitys, contacts, acc)
 
 # 使用示例
@@ -473,9 +473,12 @@ if __name__ == "__main__":
                         # 将result加入发送队列，并将结果发送给Unity
                         # 展开姿态数据为一维列表
                         pose_data = art.math.rotation_matrix_to_axis_angle(result[0]).flatten().tolist()
-                        print(pose_data.__len__())
                         tran_data = result[1].tolist()
-                        connector.send_data(pose_data, tran_data)
+                        if(len(result) >2):
+                            grf_data = result[2].flatten().tolist()
+                        else:
+                            grf_data = [0.0]*12
+                        connector.send_data(pose_data, tran_data, grf_data)
                     else:
                         # 如果没有接收到数据，使用测试数据进行可视化
                         # T-pose测试数据
