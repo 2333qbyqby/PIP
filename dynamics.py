@@ -263,9 +263,30 @@ class PhysicsOptimizer:
 
         # 添加调试信息，打印 tau 和 GRF 的形状
         if self.debug:
-            print(f"tau shape: {tau.shape}")
-            print(f"GRF shape: {GRF.shape}")
+            # 计算并输出GRF在所有轴上的合力
+            if nc > 0:
+                grf_components = GRF.reshape(-1, 3)
+                grf_total = np.sum(grf_components, axis=0)
+                grf_magnitude = np.linalg.norm(grf_total)
+                print(f"GRF total force - X: {grf_total[0]:.6f}, Y: {grf_total[1]:.6f}, Z: {grf_total[2]:.6f}")
+                print(f"GRF total magnitude: {grf_magnitude:.6f}")
 
+                # 打印每个接触点的力分量，并标注是哪个关节以及具体的点
+                point_labels = ['front-left', 'front-right', 'back-left', 'back-right']
+                
+                for i, point_force in enumerate(grf_components):
+                    # 确定这是哪个关节的第几个接触点
+                    joint_index = i // 4  # 每个关节有4个接触点
+                    point_index = i % 4   # 当前关节的第几个接触点
+                    
+                    if joint_index < len(collision_joints):
+                        joint_name = collision_joints[joint_index]
+                        point_label = point_labels[point_index]
+                        print(f"GRF component [{joint_name} - {point_label}]: "
+                              f"X: {point_force[0]:.6f}, Y: {point_force[1]:.6f}, Z: {point_force[2]:.6f}")
+                    else:
+                        print(f"GRF component [Unknown - point {i}]: "
+                              f"X: {point_force[0]:.6f}, Y: {point_force[1]:.6f}, Z: {point_force[2]:.6f}")
         qdot = qdot + qddot * self.params['delta_t']
         q = q + qdot * self.params['delta_t']
         self.q = q

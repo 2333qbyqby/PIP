@@ -226,7 +226,6 @@ class UnityConnector:
         pose_str = ','.join(['%g' % float(v) for v in pose_data])
         tran_str = ','.join(['%g' % float(v) for v in tran_data])
         grf_str = ','.join(['%g' % float(v) for v in grf_data]) if grf_data else ''
-        print(grf_data)
         # 构造消息字符串
         message = f"{pose_str}#{tran_str}#{grf_str}$"
         return message
