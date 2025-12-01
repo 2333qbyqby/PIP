@@ -405,7 +405,7 @@ class UnityConnector:
         from dynamics import PhysicsOptimizer
         self.physics_optimizer = PhysicsOptimizer(debug=debug)
 
-    def optimize_frame_with_physics(self, pose_data: List[float], jvel: List[float], contact: List[int], acc: List[float] = None):
+    def optimize_frame_with_physics(self, pose_data: List[float], jvel: List[float], contact: List[float], acc: List[float] = None):
         """
         使用物理优化器优化单帧数据
         
@@ -421,6 +421,15 @@ class UnityConnector:
         poses = np.array([])
         velocitys = np.array([])
         contacts = np.array([0, 0])  # 默认值，表示没有接触
+        
+        # 对contact数据进行额外处理，如果是1改为0.9
+        processed_contact = []
+        for c in contact:
+            if c == 1:
+                processed_contact.append(0.9)
+            else:
+                processed_contact.append(c)
+        
         # 检查pose_data是否为216个值(24个关节的3x3矩阵)
         if len(pose_data) == 216:
             # 将216个值转换为24个3x3矩阵
@@ -431,8 +440,8 @@ class UnityConnector:
             poses = np.array(rotation_matrices).reshape(1, 24, 3, 3)
         if len(jvel) == 72:
             velocitys = np.array(jvel).reshape(24, 3)
-        if len(contact) == 2 :
-            contacts = np.array(contact).reshape(2)
+        if len(processed_contact) == 2 :
+            contacts = np.array(processed_contact).reshape(2)
         if self.physics_optimizer is None:
             raise RuntimeError("Physics optimizer not initialized. Call init_physics_optimizer() first.")
         
