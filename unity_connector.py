@@ -268,7 +268,7 @@ class UnityConnector:
             grf_str = ''
 
         # 处理tau数据
-        tau_str = ','.join(['%g' % float(v) for v in tau_data]) if tau_data else ''
+        tau_str = ','.join(['%g' % float(v) for v in tau_data]) if tau_data is not None and len(tau_data) > 0 else ''
 
         # 构造消息字符串
         message = f"{pose_str}#{tran_str}#{grf_str}#{tau_str}$"

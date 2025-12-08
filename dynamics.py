@@ -179,7 +179,7 @@ class PhysicsOptimizer:
         # tau size(包含残余力约束)
         if True:
             As3.append(art.math.block_diagonal_matrix_np([
-                np.eye(6) * self.params['coeff_virtual'], # 对应论文中的残余力约束
+                np.eye(6) * self.params['coeff_virtual'] * 0.5, # 对应论文中的残余力约束
                 np.eye(self.model.qdot_size - 6) * self.params['coeff_tau']#关节扭矩约束
             ]))
             bs3.append(np.zeros(self.model.qdot_size))
