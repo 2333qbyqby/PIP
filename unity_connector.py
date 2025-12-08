@@ -128,10 +128,19 @@ class UnityConnector:
                 data = self.send_queue.get(timeout=1)
                 if data is None:
                     continue
-                    
-                pose_data, tran_data, grf_data, cj_data= data
+
+                pose_data, tran_data, grf_data, tau_data = data  # 移除 cj_data
                 # 使用_pack_unity_data函数封装数据
-                message = self._pack_unity_data(pose_data, tran_data,grf_data,cj_data)
+                message = self._pack_unity_data(pose_data, tran_data, grf_data, tau_data=tau_data)  # 移除 cj_data
+                
+                # 添加 tau 数据的调试输出
+                if tau_data is not None:
+                    print(f"发送的 tau 数据: {list(tau_data)}")
+                    print(f"tau 数据维度: {len(tau_data)}")
+                    # 计算并输出 tau 的模
+                    tau_magnitude = np.linalg.norm(np.array(tau_data))
+                    print(f"tau 总合力矩大小: {tau_magnitude}")
+                
                 # 发送封装好的数据
                 success = self._send_message(message)
                 if not success:
@@ -212,16 +221,16 @@ class UnityConnector:
 
     def _pack_unity_data(self, pose_data: List[float], tran_data: List[float],
                          grf_data: Optional[List[float]] = None,
-                         cj_data: Optional[List[int]] = None) -> str:
+                         tau_data: Optional[List[float]] = None) -> str:  # 移除 cj_data
         """
         封装发送到Unity的数据
         
         Args:
             pose_data: 姿态数据
             tran_data: 位移数据
-            cj_data: 接触关节数据
             grf_data: 地面反作用力数据 (可能是旧格式的List[float]或新格式的dict)
-            
+            tau_data: 虚拟力数据
+
         Returns:
             str: 封装后的数据字符串
         """
@@ -257,9 +266,12 @@ class UnityConnector:
             grf_str = ','.join(['%g' % float(v) for v in grf_data])
         else:
             grf_str = ''
-            
+
+        # 处理tau数据
+        tau_str = ','.join(['%g' % float(v) for v in tau_data]) if tau_data else ''
+
         # 构造消息字符串
-        message = f"{pose_str}#{tran_str}#{grf_str}$"
+        message = f"{pose_str}#{tran_str}#{grf_str}#{tau_str}$"
         return message
 
     def _parse_unity_data(self, data: str) -> Tuple[List[float], List[float], List[int], List[float]]:
@@ -298,8 +310,8 @@ class UnityConnector:
         return pose_data, tran_data, cj_data, velocity_data
 
     def send_data(self, pose_data: List[float], tran_data: List[float],
-                grf_data:List[float],
-                cj_data: Optional[List[int]] = None):
+                  grf_data: List[float],
+                  tau_data: Optional[List[float]] = None):  # 移除 cj_data
         """
         将数据添加到发送队列
         
@@ -307,9 +319,9 @@ class UnityConnector:
             pose_data: 姿态数据
             tran_data: 位移数据
             grf_data: 地面反作用力数据
-            cj_data: 接触关节数据
+            tau_data: 虚拟力数据
         """
-        self.send_queue.put((pose_data, tran_data, grf_data, cj_data))
+        self.send_queue.put((pose_data, tran_data, grf_data, tau_data))  # 移除 cj_data
 
     def receive_data(self, timeout: Optional[float] = None) -> Optional[Tuple]:
         """
@@ -492,7 +504,6 @@ class UnityConnector:
 if __name__ == "__main__":
     # 创建连接器实例
     connector = UnityConnector()
-    #connector.init_pybullet_visualization()
     connector.init_physics_optimizer(True)
     # 检查命令行参数，如果提供了test参数则运行测试姿态
     import sys
@@ -525,7 +536,9 @@ if __name__ == "__main__":
                         else:
                             # 旧的格式或者默认值
                             grf_data = [0.0] * 24  # 8个点，每点3个值
-                        connector.send_data(pose_data, tran_data, grf_data)
+                        # 处理可能缺失的虚拟力数据
+                        tau_data = result[3] if len(result) > 3 else [0.0] * 6
+                        connector.send_data(pose_data, tran_data, grf_data, tau_data)
                     else:
                         # 如果没有接收到数据，使用测试数据进行可视化
                         # T-pose测试数据

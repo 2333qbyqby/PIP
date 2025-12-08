@@ -202,12 +202,19 @@ class PhysicsOptimizer:
             for joint_name, stable in zip(['LFOOT', 'RFOOT'], c_ref):
                 joint_id = vars(Body)[joint_name]
                 pos = self.model.calc_body_position(q, joint_id)
+
+                #严格遵循论文的接触判定逻辑
+                is_contacting= (stable > 0.5)
+
+
                 J = self.model.calc_point_Jacobian(q, joint_id)
                 v = self.model.calc_point_velocity(q, qdot, joint_id)
 
                 # 添加对stable值的保护，防止出现无穷大
                 safe_stable = max(min(stable, 0.84999), 1e-6)  # 限制范围在[1e-6, 0.84999]
-                th = -np.log(safe_stable / 0.85)
+
+                th_raw = -np.log(safe_stable / 0.85)
+                th = max(th_raw, 0.01)
                 th_y = (self.params['floor_y'] - pos[1]) / self.params['delta_t']
                 Gs1.append(-self.params['delta_t'] * J)
                 hs1.append(v - [-th, th_y, -th])
@@ -385,4 +392,7 @@ class PhysicsOptimizer:
                     })
             labeled_grf['other_contacts'] = other_grf_data
 
-        return pose_opt, tran_opt, labeled_grf
+        # 添加虚拟力的六项到返回值
+        virtual_force = tau[:6]  # 提取虚拟力的六项
+
+        return pose_opt, tran_opt, labeled_grf, virtual_force
