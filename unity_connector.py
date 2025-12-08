@@ -60,6 +60,9 @@ class UnityConnector:
         
         # Physics Optimizer用于物理优化
         self.physics_optimizer = None
+        
+        # 记录当前优化的是第几帧
+        self.current_frame = 0
 
     def connect_as_server(self) -> bool:
         """
@@ -217,7 +220,7 @@ class UnityConnector:
             pose_data: 姿态数据
             tran_data: 位移数据
             cj_data: 接触关节数据
-            grf_data: 地面反作用力数据
+            grf_data: 地面反作用力数据 (可能是旧格式的List[float]或新格式的dict)
             
         Returns:
             str: 封装后的数据字符串
@@ -225,7 +228,36 @@ class UnityConnector:
         # 格式化数据，确保将numpy数组转换为Python标量
         pose_str = ','.join(['%g' % float(v) for v in pose_data])
         tran_str = ','.join(['%g' % float(v) for v in tran_data])
-        grf_str = ','.join(['%g' % float(v) for v in grf_data]) if grf_data else ''
+        
+        # 处理GRF数据，支持新旧两种格式
+        if isinstance(grf_data, dict):
+            # 新格式：结构化字典
+            # 提取左右脚的GRF数据并展平
+            flattened_grf = []
+            
+            # 处理左脚数据
+            if 'left_foot' in grf_data:
+                for point_data in grf_data['left_foot']:
+                    flattened_grf.extend(point_data['force'])
+            else:
+                # 如果没有左脚数据，填充0
+                flattened_grf.extend([0.0, 0.0, 0.0] * 4)  # 4个点，每点3个值
+            
+            # 处理右脚数据
+            if 'right_foot' in grf_data:
+                for point_data in grf_data['right_foot']:
+                    flattened_grf.extend(point_data['force'])
+            else:
+                # 如果没有右脚数据，填充0
+                flattened_grf.extend([0.0, 0.0, 0.0] * 4)  # 4个点，每点3个值
+                
+            grf_str = ','.join(['%g' % float(v) for v in flattened_grf])
+        elif grf_data:
+            # 旧格式：直接是浮点数组
+            grf_str = ','.join(['%g' % float(v) for v in grf_data])
+        else:
+            grf_str = ''
+            
         # 构造消息字符串
         message = f"{pose_str}#{tran_str}#{grf_str}$"
         return message
@@ -418,6 +450,9 @@ class UnityConnector:
         Returns:
             tuple: (优化后的姿态, 优化后的位移)
         """
+        # 增加帧计数
+        self.current_frame += 1
+        
         poses = np.array([])
         velocitys = np.array([])
         contacts = np.array([0, 0])  # 默认值，表示没有接触
@@ -426,7 +461,7 @@ class UnityConnector:
         processed_contact = []
         for c in contact:
             if c == 1:
-                processed_contact.append(0.9)
+                processed_contact.append(1)
             else:
                 processed_contact.append(c)
         
@@ -450,6 +485,7 @@ class UnityConnector:
         # print(f"poses shape: {poses.shape if hasattr(poses, 'shape') else 'N/A'}")
         # print(f"velocitys shape: {velocitys.shape if hasattr(velocitys, 'shape') else 'N/A'}")
         # print(f"contacts: {contacts}")
+        print(f"当前优化帧数{self.current_frame}")
         return self.physics_optimizer.optimize_frame(poses, velocitys, contacts, acc)
 
 # 使用示例
@@ -482,10 +518,13 @@ if __name__ == "__main__":
                         # 展开姿态数据为一维列表
                         pose_data = art.math.rotation_matrix_to_axis_angle(result[0]).flatten().tolist()
                         tran_data = result[1].tolist()
-                        if(len(result) >2):
-                            grf_data = result[2].flatten().tolist()
+                        # 处理新的GRF数据结构
+                        if len(result) > 2 and isinstance(result[2], dict):
+                            # 新的GRF结构是字典格式
+                            grf_data = result[2]
                         else:
-                            grf_data = [0.0]*12
+                            # 旧的格式或者默认值
+                            grf_data = [0.0] * 24  # 8个点，每点3个值
                         connector.send_data(pose_data, tran_data, grf_data)
                     else:
                         # 如果没有接收到数据，使用测试数据进行可视化

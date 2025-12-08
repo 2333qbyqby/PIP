@@ -65,6 +65,10 @@ class PhysicsOptimizer:
         self.model.update_kinematics(q, qdot, np.zeros(self.model.qdot_size))
         Js = [np.empty((0, self.model.qdot_size))]
         collision_points, collision_joints = [], []
+        # Track indices for left and right foot contact points
+        left_foot_indices = []
+        right_foot_indices = []
+        
         for joint_name in self.test_contact_joints:
             joint_id = vars(Body)[joint_name]
             pos = self.model.calc_body_position(q, joint_id)
@@ -72,10 +76,19 @@ class PhysicsOptimizer:
                joint_id == Body.RFOOT and c_ref[1] > 0.5 and pos[1] <= self.params['floor_y'] + 0.03 or \
                pos[1] <= self.params['floor_y']:
                 collision_joints.append(joint_name)
+                joint_start_idx = len(collision_points)  # Record starting index for this joint's contact points
+                
                 for ps in self.support_polygon + pos:
                     collision_points.append(ps)
                     pb = self.model.calc_base_to_body_coordinates(q, joint_id, ps)
                     Js.append(self.model.calc_point_Jacobian(q, joint_id, pb))
+                
+                # Record indices for left and right foot separately
+                if joint_id == Body.LFOOT:
+                    left_foot_indices.extend(list(range(joint_start_idx, len(collision_points))))
+                elif joint_id == Body.RFOOT:
+                    right_foot_indices.extend(list(range(joint_start_idx, len(collision_points))))
+                    
         Js = np.vstack(Js)
         nc = len(collision_points)
 
@@ -271,6 +284,17 @@ class PhysicsOptimizer:
                 print(f"GRF total force - X: {grf_total[0]:.6f}, Y: {grf_total[1]:.6f}, Z: {grf_total[2]:.6f}")
                 print(f"GRF total magnitude: {grf_magnitude:.6f}")
 
+                # 输出左右脚各自的GRF
+                if left_foot_indices:
+                    left_grf = grf_components[left_foot_indices]
+                    left_total = np.sum(left_grf, axis=0)
+                    print(f"LFOOT GRF - X: {left_total[0]:.6f}, Y: {left_total[1]:.6f}, Z: {left_total[2]:.6f}")
+                
+                if right_foot_indices:
+                    right_grf = grf_components[right_foot_indices]
+                    right_total = np.sum(right_grf, axis=0)
+                    print(f"RFOOT GRF - X: {right_total[0]:.6f}, Y: {right_total[1]:.6f}, Z: {right_total[2]:.6f}")
+
                 # 打印每个接触点的力分量，并标注是哪个关节以及具体的点
                 point_labels = ['front-left', 'front-right', 'back-left', 'back-right']
                 
@@ -307,4 +331,58 @@ class PhysicsOptimizer:
         pose_opt, tran_opt = rbdl_to_smpl(q)
         pose_opt = torch.from_numpy(pose_opt).float()[0]
         tran_opt = torch.from_numpy(tran_opt).float()[0]
-        return pose_opt, tran_opt, GRF
+        
+        # Create labeled GRF data
+        labeled_grf = {}
+        grf_components = GRF.reshape(-1, 3)
+        
+        # Add left foot GRF data if available
+        if left_foot_indices:
+            left_grf_data = []
+            point_labels = ['front-left', 'front-right', 'back-left', 'back-right']
+            for i, idx in enumerate(left_foot_indices):
+                if i < len(point_labels):
+                    point_label = point_labels[i]
+                else:
+                    point_label = f'point-{i}'
+                left_grf_data.append({
+                    'point': point_label,
+                    'force': grf_components[idx].tolist()
+                })
+            labeled_grf['left_foot'] = left_grf_data
+            
+        # Add right foot GRF data if available
+        if right_foot_indices:
+            right_grf_data = []
+            point_labels = ['front-left', 'front-right', 'back-left', 'back-right']
+            for i, idx in enumerate(right_foot_indices):
+                if i < len(point_labels):
+                    point_label = point_labels[i]
+                else:
+                    point_label = f'point-{i}'
+                right_grf_data.append({
+                    'point': point_label,
+                    'force': grf_components[idx].tolist()
+                })
+            labeled_grf['right_foot'] = right_grf_data
+            
+        # Add other contact points if any
+        all_foot_indices = set(left_foot_indices + right_foot_indices)
+        other_indices = [i for i in range(len(grf_components)) if i not in all_foot_indices]
+        if other_indices:
+            other_grf_data = []
+            point_labels = ['front-left', 'front-right', 'back-left', 'back-right']
+            for i, idx in enumerate(other_indices):
+                joint_index = idx // 4
+                point_index = idx % 4
+                if joint_index < len(collision_joints):
+                    joint_name = collision_joints[joint_index]
+                    point_label = point_labels[point_index] if point_index < len(point_labels) else f'point-{point_index}'
+                    other_grf_data.append({
+                        'joint': joint_name,
+                        'point': point_label,
+                        'force': grf_components[idx].tolist()
+                    })
+            labeled_grf['other_contacts'] = other_grf_data
+
+        return pose_opt, tran_opt, labeled_grf
