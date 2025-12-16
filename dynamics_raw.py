@@ -50,25 +50,21 @@ class PhysicsOptimizer:
         self.qdot = np.zeros(self.model.qdot_size)
 
     def optimize_frame(self, pose, jvel, contact, acc):
-        q_ref = smpl_to_rbdl(pose, torch.zeros(3))[0]  # 神经网络预测的姿态
-        v_ref = jvel if isinstance(jvel, np.ndarray) else jvel.numpy()  # 神经网络预测的关节速度
-        c_ref = contact.sigmoid().numpy() if isinstance(contact, torch.Tensor) else np.array(contact)  # 神经网络预测的接触信息
-        a_ref = acc.numpy() if isinstance(acc, torch.Tensor) else np.array(acc)   # IMU传感器测量的加速度
+        q_ref = smpl_to_rbdl(pose, torch.zeros(3))[0]
+        v_ref = jvel.numpy()
+        c_ref = contact.sigmoid().numpy()
+        a_ref = acc.numpy()
         q = self.q
         qdot = self.qdot
 
         if q is None:
             self.q = q_ref
             return pose, torch.zeros(3)
-        print('optimize frame')
+
         # determine the contact joints and points
         self.model.update_kinematics(q, qdot, np.zeros(self.model.qdot_size))
         Js = [np.empty((0, self.model.qdot_size))]
         collision_points, collision_joints = [], []
-        # Track indices for left and right foot contact points
-        left_foot_indices = []
-        right_foot_indices = []
-        
         for joint_name in self.test_contact_joints:
             joint_id = vars(Body)[joint_name]
             pos = self.model.calc_body_position(q, joint_id)
@@ -76,19 +72,10 @@ class PhysicsOptimizer:
                joint_id == Body.RFOOT and c_ref[1] > 0.5 and pos[1] <= self.params['floor_y'] + 0.03 or \
                pos[1] <= self.params['floor_y']:
                 collision_joints.append(joint_name)
-                joint_start_idx = len(collision_points)  # Record starting index for this joint's contact points
-                
                 for ps in self.support_polygon + pos:
                     collision_points.append(ps)
                     pb = self.model.calc_base_to_body_coordinates(q, joint_id, ps)
                     Js.append(self.model.calc_point_Jacobian(q, joint_id, pb))
-                
-                # Record indices for left and right foot separately
-                if joint_id == Body.LFOOT:
-                    left_foot_indices.extend(list(range(joint_start_idx, len(collision_points))))
-                elif joint_id == Body.RFOOT:
-                    right_foot_indices.extend(list(range(joint_start_idx, len(collision_points))))
-                    
         Js = np.vstack(Js)
         nc = len(collision_points)
 
@@ -105,7 +92,7 @@ class PhysicsOptimizer:
                                        [np.empty(0)], [np.zeros((0, self.model.qdot_size))], [np.empty(0)]
         A_, b_ = None, None
 
-        # joint angle PD controller（对应论文公式3）
+        # joint angle PD controller
         if True:
             A = np.hstack((np.zeros((self.model.qdot_size - 3, 3)), np.eye((self.model.qdot_size - 3))))
             b = self.params['kp_angular'] * art.math.angle_difference(q_ref[3:], q[3:]) - self.params['kd_angular'] * qdot[3:]
@@ -127,15 +114,15 @@ class PhysicsOptimizer:
                 As1.append(A * 2)
                 bs1.append(b * 2)
 
-        # joint position PD controller (using joint velocity to determine target joint position)（论文公式5）
+        # joint position PD controller (using joint velocity to determine target joint position)
         if True:
             for joint_name, v in zip(['ROOT', 'LHIP', 'RHIP', 'SPINE1', 'LKNEE', 'RKNEE', 'SPINE2', 'LANKLE', 'RANKLE',
                                       'SPINE3', 'LFOOT', 'RFOOT', 'NECK', 'LCLAVICLE', 'RCLAVICLE', 'HEAD', 'LSHOULDER',
                                       'RSHOULDER', 'LELBOW', 'RELBOW', 'LWRIST', 'RWRIST'], v_ref[:22]):
                 joint_id = vars(Body)[joint_name]
                 if joint_id == Body.LFOOT or joint_id == Body.RFOOT: continue
-                cur_vel = self.model.calc_point_velocity(q, qdot, joint_id) # ?
-                a_des = self.params['kp_linear'] * v * self.params['delta_t'] - self.params['kd_linear'] * cur_vel #对应论文的
+                cur_vel = self.model.calc_point_velocity(q, qdot, joint_id)
+                a_des = self.params['kp_linear'] * v * self.params['delta_t'] - self.params['kd_linear'] * cur_vel
                 A = self.model.calc_point_Jacobian(q, joint_id)
                 b = -self.model.calc_point_acceleration(q, qdot, np.zeros(75), joint_id) + a_des
                 As1.append(A * self.params['coeff_jvel'])
@@ -168,7 +155,7 @@ class PhysicsOptimizer:
             As2.append(np.eye(nc * 3) * self.params['coeff_lambda_old'])
             bs2.append(np.zeros(nc * 3))
 
-        # Signorini’s conditions of lambda对应论文公式9中的E_lambda
+        # Signorini’s conditions of lambda
         if True:
             if nc != 0:
                 A = [np.eye(3) * max(cp[1] - self.params['floor_y'], 0.005) for cp in collision_points]
@@ -176,11 +163,11 @@ class PhysicsOptimizer:
                 As2.append(A * self.params['coeff_lambda'])
                 bs2.append(np.zeros(nc * 3))
 
-        # tau size(包含残余力约束)
+        # tau size
         if True:
             As3.append(art.math.block_diagonal_matrix_np([
-                np.eye(6) * self.params['coeff_virtual'] * 3.16, # 对应论文中的残余力约束
-                np.eye(self.model.qdot_size - 6) * self.params['coeff_tau']#关节扭矩约束
+                np.eye(6) * self.params['coeff_virtual'],
+                np.eye(self.model.qdot_size - 6) * self.params['coeff_tau']
             ]))
             bs3.append(np.zeros(self.model.qdot_size))
 
@@ -202,20 +189,10 @@ class PhysicsOptimizer:
             for joint_name, stable in zip(['LFOOT', 'RFOOT'], c_ref):
                 joint_id = vars(Body)[joint_name]
                 pos = self.model.calc_body_position(q, joint_id)
-
-                #严格遵循论文的接触判定逻辑
-                is_contacting= (stable > 0.5)
-                if(not is_contacting):
-                    continue
-
                 J = self.model.calc_point_Jacobian(q, joint_id)
                 v = self.model.calc_point_velocity(q, qdot, joint_id)
 
-                # 添加对stable值的保护，防止出现无穷大
-                safe_stable = max(min(stable, 0.84999), 1e-6)  # 限制范围在[1e-6, 0.84999]
-
-                th_raw = -np.log(safe_stable / 0.85)
-                th = max(th_raw, 0.01)
+                th = -np.log(min(stable, 0.84999) / 0.85)
                 th_y = (self.params['floor_y'] - pos[1]) / self.params['delta_t']
                 Gs1.append(-self.params['delta_t'] * J)
                 hs1.append(v - [-th, th_y, -th])
@@ -244,157 +221,32 @@ class PhysicsOptimizer:
 
         # fast solvers are less accurate/robust, and may fail
         init = self.last_x if len(self.last_x) == len(q_) else None
-        
-        # # 添加调试输出
-        # if self.debug:
-        #     print("Debugging QP matrices:")
-        #     print(f"P_ shape: {P_.shape}, P_ dtype: {P_.dtype}")
-        #     print(f"q_ shape: {q_.shape}, q_ dtype: {q_.dtype}")
-        #     print(f"G_ shape: {G_.shape}, G_ dtype: {G_.dtype}")
-        #     print(f"h_ shape: {h_.shape}, h_ dtype: {h_.dtype}")
-        #     print(f"A_ shape: {A_.shape}, A_ dtype: {A_.dtype}")
-        #     print(f"b_ shape: {b_.shape}, b_ dtype: {b_.dtype}")
-        #
-        #     # 检查是否有 NaN 或无穷大值
-        #     print(f"P_ has NaN: {np.isnan(P_).any()}, P_ has Inf: {np.isinf(P_).any()}")
-        #     print(f"q_ has NaN: {np.isnan(q_).any()}, q_ has Inf: {np.isinf(q_).any()}")
-        #     print(f"G_ has NaN: {np.isnan(G_).any()}, G_ has Inf: {np.isinf(G_).any()}")
-        #     print(f"h_ has NaN: {np.isnan(h_).any()}, h_ has Inf: {np.isinf(h_).any()}")
-        #     print(f"A_ has NaN: {np.isnan(A_).any()}, A_ has Inf: {np.isinf(A_).any()}")
-        #     print(f"b_ has NaN: {np.isnan(b_).any()}, b_ has Inf: {np.isinf(b_).any()}")
-        #
-        #     # 检查矩阵是否为负或零
-        #     if P_.shape[0] > 0 and P_.shape[1] > 0:
-        #         eigenvals = np.linalg.eigvals(P_)
-        #         print(f"P_ min eigenvalue: {np.min(eigenvals)}, max eigenvalue: {np.max(eigenvals)}")
-        #
-        #     if init is not None:
-        #         print(f"init shape: {init.shape}, init has NaN: {np.isnan(init).any()}, init has Inf: {np.isinf(init).any()}")
-        
         x = solve_qp(P_, q_, G_, h_, A_, b_, solver='quadprog', initvals=init)
 
         if x is None or np.linalg.norm(x) > 10000:
-            if self.debug:
-                print("Using cvxopt solver as fallback")
             x = solve_qp(P_, q_, G_, h_, A_, b_, solver='cvxopt', initvals=init)
 
         qddot = x[:self.model.qdot_size]
         GRF = x[self.model.qdot_size:-self.model.qdot_size]
         tau = x[-self.model.qdot_size:]
 
-        # 添加调试信息，打印 tau 和 GRF 的形状
-        if self.debug:
-            # 计算并输出GRF在所有轴上的合力
-            if nc > 0:
-                grf_components = GRF.reshape(-1, 3)
-                grf_total = np.sum(grf_components, axis=0)
-                grf_magnitude = np.linalg.norm(grf_total)
-                print(f"GRF total force - X: {grf_total[0]:.6f}, Y: {grf_total[1]:.6f}, Z: {grf_total[2]:.6f}")
-                print(f"GRF total magnitude: {grf_magnitude:.6f}")
-
-                # 输出左右脚各自的GRF
-                if left_foot_indices:
-                    left_grf = grf_components[left_foot_indices]
-                    left_total = np.sum(left_grf, axis=0)
-                    print(f"LFOOT GRF - X: {left_total[0]:.6f}, Y: {left_total[1]:.6f}, Z: {left_total[2]:.6f}")
-                
-                if right_foot_indices:
-                    right_grf = grf_components[right_foot_indices]
-                    right_total = np.sum(right_grf, axis=0)
-                    print(f"RFOOT GRF - X: {right_total[0]:.6f}, Y: {right_total[1]:.6f}, Z: {right_total[2]:.6f}")
-
-                # 打印每个接触点的力分量，并标注是哪个关节以及具体的点
-                point_labels = ['front-left', 'front-right', 'back-left', 'back-right']
-                
-                for i, point_force in enumerate(grf_components):
-                    # 确定这是哪个关节的第几个接触点
-                    joint_index = i // 4  # 每个关节有4个接触点
-                    point_index = i % 4   # 当前关节的第几个接触点
-                    
-                    if joint_index < len(collision_joints):
-                        joint_name = collision_joints[joint_index]
-                        point_label = point_labels[point_index]
-                        print(f"GRF component [{joint_name} - {point_label}]: "
-                              f"X: {point_force[0]:.6f}, Y: {point_force[1]:.6f}, Z: {point_force[2]:.6f}")
-                    else:
-                        print(f"GRF component [Unknown - point {i}]: "
-                              f"X: {point_force[0]:.6f}, Y: {point_force[1]:.6f}, Z: {point_force[2]:.6f}")
         qdot = qdot + qddot * self.params['delta_t']
         q = q + qdot * self.params['delta_t']
         self.q = q
-        #self.q = q_ref.copy()
         self.qdot = qdot
         self.last_x = x
 
         if self.debug:
             # self.clock.tick(60)   # please install pygame
             set_pose(self.id_robot, q)
-            #print("当前帧的全局姿态", q)
             self.params = read_debug_param_values_from_bullet()
 
-            #if False:   # visualize GRF (no smoothing)
-            # p.removeAllUserDebugItems()
-            # for point, force in zip(collision_points, GRF.reshape(-1, 3)):
-            #     p.addUserDebugLine(point, point + force * 1e-2, [1, 0, 0])
+            if False:   # visualize GRF (no smoothing)
+                p.removeAllUserDebugItems()
+                for point, force in zip(collision_points, GRF.reshape(-1, 3)):
+                    p.addUserDebugLine(point, point + force * 1e-2, [1, 0, 0])
 
         pose_opt, tran_opt = rbdl_to_smpl(q)
         pose_opt = torch.from_numpy(pose_opt).float()[0]
         tran_opt = torch.from_numpy(tran_opt).float()[0]
-        
-        # Create labeled GRF data
-        labeled_grf = {}
-        grf_components = GRF.reshape(-1, 3)
-        
-        # Add left foot GRF data if available
-        if left_foot_indices:
-            left_grf_data = []
-            point_labels = ['front-left', 'front-right', 'back-left', 'back-right']
-            for i, idx in enumerate(left_foot_indices):
-                if i < len(point_labels):
-                    point_label = point_labels[i]
-                else:
-                    point_label = f'point-{i}'
-                left_grf_data.append({
-                    'point': point_label,
-                    'force': grf_components[idx].tolist()
-                })
-            labeled_grf['left_foot'] = left_grf_data
-            
-        # Add right foot GRF data if available
-        if right_foot_indices:
-            right_grf_data = []
-            point_labels = ['front-left', 'front-right', 'back-left', 'back-right']
-            for i, idx in enumerate(right_foot_indices):
-                if i < len(point_labels):
-                    point_label = point_labels[i]
-                else:
-                    point_label = f'point-{i}'
-                right_grf_data.append({
-                    'point': point_label,
-                    'force': grf_components[idx].tolist()
-                })
-            labeled_grf['right_foot'] = right_grf_data
-            
-        # Add other contact points if any
-        all_foot_indices = set(left_foot_indices + right_foot_indices)
-        other_indices = [i for i in range(len(grf_components)) if i not in all_foot_indices]
-        if other_indices:
-            other_grf_data = []
-            point_labels = ['front-left', 'front-right', 'back-left', 'back-right']
-            for i, idx in enumerate(other_indices):
-                joint_index = idx // 4
-                point_index = idx % 4
-                if joint_index < len(collision_joints):
-                    joint_name = collision_joints[joint_index]
-                    point_label = point_labels[point_index] if point_index < len(point_labels) else f'point-{point_index}'
-                    other_grf_data.append({
-                        'joint': joint_name,
-                        'point': point_label,
-                        'force': grf_components[idx].tolist()
-                    })
-            labeled_grf['other_contacts'] = other_grf_data
-
-        # 添加虚拟力的六项到返回值
-        virtual_force = tau[:6]  # 提取虚拟力的六项
-
-        return pose_opt, tran_opt, labeled_grf, virtual_force
+        return pose_opt, tran_opt
