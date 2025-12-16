@@ -203,10 +203,6 @@ class PhysicsOptimizer:
                 joint_id = vars(Body)[joint_name]
                 pos = self.model.calc_body_position(q, joint_id)
 
-                #严格遵循论文的接触判定逻辑
-                is_contacting= (stable > 0.5)
-                if(not is_contacting):
-                    continue
 
                 J = self.model.calc_point_Jacobian(q, joint_id)
                 v = self.model.calc_point_velocity(q, qdot, joint_id)
