@@ -221,7 +221,7 @@ class UnityConnector:
 
     def _pack_unity_data(self, pose_data: List[float], tran_data: List[float],
                          grf_data: Optional[List[float]] = None,
-                         tau_data: Optional[List[float]] = None) -> str:  # 移除 cj_data
+                         tau_data: Optional[List[float]] = None) -> str:
         """
         封装发送到Unity的数据
         
@@ -293,7 +293,7 @@ class UnityConnector:
         if len(parts) != 4:
             raise ValueError(f"数据格式错误：期望4个部分，实际收到{len(parts)}个部分")
         
-        pose_str, tran_str, cj_str, grf_str = parts
+        pose_str, tran_str, cj_str, velocity_str = parts
         
         # 解析姿态数据 (pose_data)
         pose_data = [float(x) for x in pose_str.split(',')] if pose_str else []
@@ -302,10 +302,10 @@ class UnityConnector:
         tran_data = [float(x) for x in tran_str.split(',')] if tran_str else []
         
         # 解析接触数据 (cj_data)
-        cj_data = [int(x) for x in cj_str.split(',')] if cj_str else []
+        cj_data = [float(x) for x in cj_str.split(',')] if cj_str else []
 
-        # 解析地面反作用力数据 (grf_data)
-        velocity_data = [float(x) for x in grf_str.split(',')] if grf_str else []
+        # 解析速度数据 (velocity_data)
+        velocity_data = [float(x) for x in velocity_str.split(',')] if velocity_str else []
         
         return pose_data, tran_data, cj_data, velocity_data
 
@@ -472,10 +472,7 @@ class UnityConnector:
         # 对contact数据进行额外处理，如果是1改为0.9
         processed_contact = []
         for c in contact:
-            if c == 1:
-                processed_contact.append(1)
-            else:
-                processed_contact.append(c)
+            processed_contact.append(c)
         
         # 检查pose_data是否为216个值(24个关节的3x3矩阵)
         if len(pose_data) == 216:
