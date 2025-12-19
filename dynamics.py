@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import pybullet as p
 import articulate as art
+from typing import Optional
 from articulate.utils.bullet import *
 from articulate.utils.rbdl import *
 from utils import *
@@ -52,7 +53,13 @@ class PhysicsOptimizer:
     def optimize_frame(self, pose, jvel, contact, acc):
         q_ref = smpl_to_rbdl(pose, torch.zeros(3))[0]  # 神经网络预测的姿态
         v_ref = jvel if isinstance(jvel, np.ndarray) else jvel.numpy()  # 神经网络预测的关节速度
-        c_ref = np.array(c_ref, dtype=np.float32).reshape(-1)
+        # contact 既可能来自网络输出（torch.Tensor），也可能来自Unity传入（list/np.ndarray）
+        if isinstance(contact, torch.Tensor):
+            c_ref = contact.sigmoid().detach().cpu().numpy().astype(np.float32).reshape(-1)
+        elif contact is None:
+            c_ref = np.zeros((0,), dtype=np.float32)
+        else:
+            c_ref = np.asarray(contact, dtype=np.float32).reshape(-1)
 
         # contact 新结构（10 floats）：
         # [0]=左脚接触程度, [1]=右脚接触程度
@@ -78,39 +85,42 @@ class PhysicsOptimizer:
         Js = [np.empty((0, self.model.qdot_size))]
         collision_points, collision_joints = [], []
 
-        foot_point_labels = ['front-left', 'front-right', 'back-left', 'back-right']
-        # 记录每个脚底点（0..3）对应的 collision_points 索引（只记录参与QP的点）
-        left_point_to_collision_idx = {}
-        right_point_to_collision_idx = {}
+        foot_point_labels = ['front-left', 'front-right', 'back-left', 'back-right']  # 对应 self.support_polygon 的4个点
+
+        # 记录每个脚底点（0..3）对应的 collision_points 索引（用于回传GRF时固定4点顺序）
+        left_point_to_collision_idx = {}   # key: 0..3 -> collision_idx
+        right_point_to_collision_idx = {}  # key: 0..3 -> collision_idx
+
         # 记录每个 collision point 的元信息，便于debug输出与回传结构化GRF
         collision_point_meta = []  # list[tuple[str joint_name, str point_label]]
-        
+
+        def _add_contact_point(joint_name: str, joint_id: int, pos: np.ndarray, point_i: int, point_map: Optional[dict]):
+            """添加一个接触点到QP（collision_points + Jacobian），并可选记录脚底点映射。"""
+            ps = self.support_polygon[point_i] + pos
+            collision_points.append(ps)
+            collision_point_meta.append((joint_name, foot_point_labels[point_i] if point_i < 4 else f'point-{point_i}'))
+            pb = self.model.calc_base_to_body_coordinates(q, joint_id, ps)
+            Js.append(self.model.calc_point_Jacobian(q, joint_id, pb))
+            if point_map is not None and point_i < 4:
+                point_map[point_i] = len(collision_points) - 1
+
         for joint_name in self.test_contact_joints:
             joint_id = vars(Body)[joint_name]
             pos = self.model.calc_body_position(q, joint_id)
 
             # 新结构：脚底接触点由foot_point_flags(0/1)显式给定，用来替代旧的“固定4点+高度阈值”的取法
             if joint_id in (Body.LFOOT, Body.RFOOT) and foot_point_flags is not None:
-                if joint_id == Body.LFOOT:
-                    flags = foot_point_flags[:4]
-                    point_map = left_point_to_collision_idx
-                else:
-                    flags = foot_point_flags[4:]
-                    point_map = right_point_to_collision_idx
-
+                is_left = (joint_id == Body.LFOOT)
+                flags = foot_point_flags[:4] if is_left else foot_point_flags[4:]
+                point_map = left_point_to_collision_idx if is_left else right_point_to_collision_idx
                 selected = [i for i, f in enumerate(flags) if float(f) > 0.5]
 
-                # 若显式点接触为空，但模型穿透地面，则仍然加约束防止穿模（旧逻辑保留）
+                # 若显式点接触为空，但模型穿透地面，则仍然加约束防止穿模（保留原意）
                 if selected or pos[1] <= self.params['floor_y']:
                     collision_joints.append(joint_name)
-                    use_indices = selected if selected else list(range(4))
-                    for i in use_indices:
-                        ps = self.support_polygon[i] + pos
-                        collision_points.append(ps)
-                        collision_point_meta.append((joint_name, foot_point_labels[i]))
-                        pb = self.model.calc_base_to_body_coordinates(q, joint_id, ps)
-                        Js.append(self.model.calc_point_Jacobian(q, joint_id, pb))
-                        point_map[i] = len(collision_points) - 1
+                    use_indices = selected if selected else [0, 1, 2, 3]
+                    for point_i in use_indices:
+                        _add_contact_point(joint_name, joint_id, pos, point_i, point_map)
                 continue
 
             # 旧结构/其它关节：维持原来的接触判定与固定4点
@@ -118,17 +128,14 @@ class PhysicsOptimizer:
                (joint_id == Body.RFOOT and foot_stable[1] > 0.5 and pos[1] <= self.params['floor_y'] + 0.03) or \
                (pos[1] <= self.params['floor_y']):
                 collision_joints.append(joint_name)
-                for i, ps in enumerate(self.support_polygon + pos):
-                    collision_points.append(ps)
-                    # 非脚部关节也给一个稳定的point label，方便debug；脚部在旧结构下也沿用这套label
-                    collision_point_meta.append((joint_name, foot_point_labels[i] if i < len(foot_point_labels) else f'point-{i}'))
-                    pb = self.model.calc_base_to_body_coordinates(q, joint_id, ps)
-                    Js.append(self.model.calc_point_Jacobian(q, joint_id, pb))
-                    # 旧结构下脚底也是固定4点：这里也要记录索引，保证回传GRF时左右脚4点不丢失
-                    if joint_id == Body.LFOOT and i < 4:
-                        left_point_to_collision_idx[i] = len(collision_points) - 1
-                    elif joint_id == Body.RFOOT and i < 4:
-                        right_point_to_collision_idx[i] = len(collision_points) - 1
+                point_map = None
+                if joint_id == Body.LFOOT:
+                    point_map = left_point_to_collision_idx
+                elif joint_id == Body.RFOOT:
+                    point_map = right_point_to_collision_idx
+
+                for point_i in range(4):
+                    _add_contact_point(joint_name, joint_id, pos, point_i, point_map)
                     
         Js = np.vstack(Js)
         nc = len(collision_points)
@@ -330,8 +337,8 @@ class PhysicsOptimizer:
                 print(f"GRF total magnitude: {grf_magnitude:.6f}")
 
                 # 输出左右脚各自的GRF
-                left_foot_indices = list(left_point_to_collision_idx.values())
-                right_foot_indices = list(right_point_to_collision_idx.values())
+                left_foot_indices = [left_point_to_collision_idx[i] for i in range(4) if i in left_point_to_collision_idx]
+                right_foot_indices = [right_point_to_collision_idx[i] for i in range(4) if i in right_point_to_collision_idx]
 
                 if left_foot_indices:
                     left_grf = grf_components[left_foot_indices]
