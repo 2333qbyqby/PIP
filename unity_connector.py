@@ -457,6 +457,10 @@ class UnityConnector:
             pose: 姿态数据
             jvel: 关节速度数据
             contact: 接触信息数据
+                - 新结构：10个float
+                  [0]=左脚接触程度, [1]=右脚接触程度
+                  [2:6]=左脚4个点(0/1), [6:10]=右脚4个点(0/1)
+                - 兼容旧结构：2个float [左脚接触程度, 右脚接触程度]
             acc: 加速度数据
             
         Returns:
@@ -467,12 +471,10 @@ class UnityConnector:
         
         poses = np.array([])
         velocitys = np.array([])
-        contacts = np.array([0, 0])  # 默认值，表示没有接触
+        contacts = np.array([0.0, 0.0], dtype=np.float32)  # 默认值，表示没有接触
         
-        # 对contact数据进行额外处理，如果是1改为0.9
-        processed_contact = []
-        for c in contact:
-            processed_contact.append(c)
+        # 统一为float（Unity侧可能传字符串/整型）
+        processed_contact = [float(c) for c in contact] if contact is not None else []
         
         # 检查pose_data是否为216个值(24个关节的3x3矩阵)
         if len(pose_data) == 216:
@@ -484,8 +486,14 @@ class UnityConnector:
             poses = np.array(rotation_matrices).reshape(1, 24, 3, 3)
         if len(jvel) == 72:
             velocitys = np.array(jvel).reshape(24, 3)
-        if len(processed_contact) == 2 :
-            contacts = np.array(processed_contact).reshape(2)
+        if len(processed_contact) == 2:
+            contacts = np.array(processed_contact, dtype=np.float32).reshape(2)
+        elif len(processed_contact) == 10:
+            contacts = np.array(processed_contact, dtype=np.float32).reshape(10)
+        elif len(processed_contact) > 0:
+            # 容错：长度不匹配时尽量取前2个作为左右脚接触程度
+            padded = (processed_contact + [0.0, 0.0])[:2]
+            contacts = np.array(padded, dtype=np.float32).reshape(2)
         if self.physics_optimizer is None:
             raise RuntimeError("Physics optimizer not initialized. Call init_physics_optimizer() first.")
         
