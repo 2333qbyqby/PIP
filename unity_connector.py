@@ -460,7 +460,6 @@ class UnityConnector:
                 - 新结构：10个float
                   [0]=左脚接触程度, [1]=右脚接触程度
                   [2:6]=左脚4个点(0/1), [6:10]=右脚4个点(0/1)
-                - 兼容旧结构：2个float [左脚接触程度, 右脚接触程度]
             acc: 加速度数据
             
         Returns:
@@ -496,12 +495,6 @@ class UnityConnector:
             contacts = np.array(padded, dtype=np.float32).reshape(2)
         if self.physics_optimizer is None:
             raise RuntimeError("Physics optimizer not initialized. Call init_physics_optimizer() first.")
-        
-        # 添加调试信息
-        # print("=== UnityConnector Debug Info ===")
-        # print(f"poses shape: {poses.shape if hasattr(poses, 'shape') else 'N/A'}")
-        # print(f"velocitys shape: {velocitys.shape if hasattr(velocitys, 'shape') else 'N/A'}")
-        # print(f"contacts: {contacts}")
         print(f"当前优化帧数{self.current_frame}")
         return self.physics_optimizer.optimize_frame(poses, velocitys, contacts, acc)
 

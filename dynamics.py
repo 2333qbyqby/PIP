@@ -43,12 +43,15 @@ class PhysicsOptimizer:
         self.last_x = []
         self.q = None
         self.qdot = np.zeros(self.model.qdot_size)
+        # 上一帧接触点的力（用于平滑约束），key = (joint_name, point_label)，value = np.ndarray shape(3,)
+        self.prev_contact_forces = {}
         self.reset_states()
 
     def reset_states(self):
         self.last_x = []
         self.q = None
         self.qdot = np.zeros(self.model.qdot_size)
+        self.prev_contact_forces = {}
 
     def optimize_frame(self, pose, jvel, contact, acc):
         q_ref = smpl_to_rbdl(pose, torch.zeros(3))[0]  # 神经网络预测的姿态
@@ -272,6 +275,44 @@ class PhysicsOptimizer:
                 Gs2.append(art.math.block_diagonal_matrix_np([self.friction_constraint_matrix] * nc))
                 hs2.append(np.zeros(nc * 4))
 
+        # 额外约束：接触点持续接触时，对力的变化做约束，让接触力平滑（减少抖动）
+        # 说明：
+        # - 这里只使用线性不等式约束（对每个分量做上下界），兼顾“方向”和“大小”不要和上一帧差太多
+        # - 仅当同一个接触点在上一帧也存在（持续接触）时才添加
+        if True:
+            if nc > 0 and isinstance(self.prev_contact_forces, dict) and len(self.prev_contact_forces) > 0:
+                # 参数：绝对变化上限 + 相对变化上限（越大越松，越不容易导致QP不可行）
+                smooth_abs = float(self.params.get('contact_force_smooth_abs', 50.0))
+                smooth_rel = float(self.params.get('contact_force_smooth_rel', 0.5))
+
+                smooth_rows = []
+                smooth_rhs = []
+
+                for i in range(nc):
+                    if i >= len(collision_point_meta):
+                        continue
+                    key = collision_point_meta[i]  # (joint_name, point_label)
+                    prev_f = self.prev_contact_forces.get(key, None)
+                    if prev_f is None:
+                        continue  # 新接触点：不加平滑约束
+                    prev_f = np.asarray(prev_f, dtype=np.float64).reshape(3)
+
+                    # 对每个分量施加 |f - f_prev| <= abs + rel*|f_prev|
+                    for k in range(3):
+                        delta = smooth_abs + smooth_rel * abs(float(prev_f[k]))
+                        # +f <= f_prev + delta
+                        row = np.zeros(nc * 3, dtype=np.float64)
+                        row[i * 3 + k] = 1.0
+                        smooth_rows.append(row)
+                        smooth_rhs.append(float(prev_f[k]) + delta)
+                        # -f <= -(f_prev - delta)
+                        smooth_rows.append(-row)
+                        smooth_rhs.append(-(float(prev_f[k]) - delta))
+
+                if smooth_rows:
+                    Gs2.append(np.vstack(smooth_rows))
+                    hs2.append(np.asarray(smooth_rhs, dtype=np.float64))
+
         # equation of motion (equality constraint)
         if True:
             M = self.model.calc_M(q)
@@ -325,6 +366,18 @@ class PhysicsOptimizer:
         qddot = x[:self.model.qdot_size]
         GRF = x[self.model.qdot_size:-self.model.qdot_size]
         tau = x[-self.model.qdot_size:]
+
+        # 更新“上一帧接触力”状态：只保留当前帧仍在接触集合中的点
+        # 如果某点不再接触（本帧未进入 collision_points），它将自动从字典中消失，从而不再受平滑约束
+        if nc > 0:
+            grf_components_for_state = GRF.reshape(-1, 3)
+            new_prev = {}
+            for i in range(min(nc, len(collision_point_meta))):
+                key = collision_point_meta[i]
+                new_prev[key] = grf_components_for_state[i].copy()
+            self.prev_contact_forces = new_prev
+        else:
+            self.prev_contact_forces = {}
 
         # 添加调试信息，打印 tau 和 GRF 的形状
         if self.debug:

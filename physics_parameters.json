@@ -54,5 +54,15 @@
         "min": 0,
         "max": 1,
         "value": 0.01
+    }, {
+        "name": "contact_force_smooth_abs",
+        "min": 0,
+        "max": 500,
+        "value": 50
+    }, {
+        "name": "contact_force_smooth_rel",
+        "min": 0,
+        "max": 2,
+        "value": 0.5
     }
 ]
