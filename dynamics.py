@@ -11,6 +11,32 @@ from config import paths
 
 
 class PhysicsOptimizer:
+    """
+    物理优化器（对应 PIP: Yi et al., CVPR 2022, Sec. 3.2.3 Motion Tracking Optimizer）
+
+    论文中的QP（Eq. 7）核心形式：
+      变量：x = [q̈, λ, τ]
+        - q̈ ∈ R^N：广义加速度（N = DoF = 3 + 3J，在本实现中用 self.model.qdot_size 表示）
+        - λ ∈ R^(3*n_c)：接触点的地面反力/GRF（每个接触点3维力，n_c为接触点数）
+        - τ ∈ R^N：广义力，其中 τ[:6] 为 root residual force（论文允许小的残余来补偿模型/真实差异）
+
+      目标：min  E_PD(q̈) + E_reg(λ, τ)
+        - E_PD = kθ * Eθ + kr * Er
+          * Eθ = || q̈[3:] - θ̈_des ||^2          （Dual PD 的角度控制项，见论文 Sec.3.2.2）
+          * Er = || J q̈ + Jdot qdot - r̈_des ||^2 （Dual PD 的位置/全局姿态控制项）
+        - E_reg = kλ Eλ + k_res E_res + kτ Eτ      （Eq. 9）
+          * Eλ  = Σ_c d_c ||λ_c||^2               （Signorini 相关的正则，d_c 为接触点高度）
+          * E_res = ||τ[:6]||^2                   （root residual force 正则）
+          * Eτ    = ||τ[6:]||^2                   （关节力矩正则）
+
+      约束（Eq. 7）：
+        - 动力学方程（equation of motion）:  M(q) q̈ + h(q,qdot) = J_c^T λ + τ
+        - 摩擦锥（friction cone）:            λ ∈ F（实现中用线性化金字塔近似保持QP）
+        - 无滑动/防穿透（no sliding）:        ṙ_j(q̈) ∈ C（实现中用离散时间的速度不等式近似）
+
+    注意：本仓库在论文基础上还加入了若干“工程化”扩展（见代码中 [Repo扩展/非论文] 标注），
+    例如接触力跨帧平滑约束、Unity侧显式脚底接触点输入等，用于提升实时稳定性/可控性。
+    """
     test_contact_joints = ['LHIP', 'RHIP', 'SPINE1', 'LKNEE', 'RKNEE', 'SPINE2',
                            'SPINE3', 'LSHOULDER', 'RSHOULDER', 'HEAD',
                            'LELBOW', 'RELBOW', 'LHAND', 'RHAND', 'LFOOT', 'RFOOT'
@@ -54,7 +80,11 @@ class PhysicsOptimizer:
         self.prev_contact_forces = {}
 
     def optimize_frame(self, pose, jvel, contact, acc):
-        q_ref = smpl_to_rbdl(pose, torch.zeros(3))[0]  # 神经网络预测的姿态
+        # === 论文符号对照 ===
+        # q_ref: 论文中的“参考运动” q̂ / φ（网络预测的姿态），这里转换到RBDL表示的广义坐标 q_ref
+        # v_ref: 论文中的关节速度 v（网络预测），用于构造 r_ref / r̈_des（Eq.(4)(5)）
+        # contact: 论文中的 foot-ground contact probabilities c（2维：左右脚）；本仓库支持更丰富结构，见下
+        q_ref = smpl_to_rbdl(pose, torch.zeros(3))[0]  # 神经网络预测的姿态（转换到RBDL广义坐标）
         v_ref = jvel if isinstance(jvel, np.ndarray) else jvel.numpy()  # 神经网络预测的关节速度
         # contact 既可能来自网络输出（torch.Tensor），也可能来自Unity传入（list/np.ndarray）
         if isinstance(contact, torch.Tensor):
@@ -64,7 +94,7 @@ class PhysicsOptimizer:
         else:
             c_ref = np.asarray(contact, dtype=np.float32).reshape(-1)
 
-        # contact 新结构（10 floats）：
+        # [Repo扩展/非论文] contact 新结构（10 floats）：
         # [0]=左脚接触程度, [1]=右脚接触程度
         # [2:6]=左脚4点(0/1), [6:10]=右脚4点(0/1)
         # 兼容旧结构（2 floats）：仅左右脚接触程度
@@ -83,7 +113,9 @@ class PhysicsOptimizer:
             self.q = q_ref
             return pose, torch.zeros(3)
         print('optimize frame')
-        # determine the contact joints and points
+        # === Contact Point Determination（论文 Sec.3.2.3）===
+        # 论文做法：先判定哪些关节与地面接触，再在每个接触关节处画 L×L 方形取4个顶点作为接触点（facet contact更稳定）。
+        # 本实现的“support_polygon + pos”就是这一4点近似（L≈20cm）。
         self.model.update_kinematics(q, qdot, np.zeros(self.model.qdot_size))
         Js = [np.empty((0, self.model.qdot_size))]
         collision_points, collision_joints = [], []
@@ -111,7 +143,9 @@ class PhysicsOptimizer:
             joint_id = vars(Body)[joint_name]
             pos = self.model.calc_body_position(q, joint_id)
 
-            # 新结构：脚底接触点由foot_point_flags(0/1)显式给定，用来替代旧的“固定4点+高度阈值”的取法
+            # [Repo扩展/非论文] 新结构：脚底接触点由 foot_point_flags(0/1) 显式给定（每只脚4点）
+            # - 论文原始做法：一旦判定“该脚关节接触”，就取该关节处 L×L 方形的 4 个顶点作为接触点（facet contact）。
+            # - 本扩展做法：允许上层（Unity/其他模块）直接指定 4 点里哪些点参与接触，用于更精细/可控的足底接触建模。
             if joint_id in (Body.LFOOT, Body.RFOOT) and foot_point_flags is not None:
                 is_left = (joint_id == Body.LFOOT)
                 flags = foot_point_flags[:4] if is_left else foot_point_flags[4:]
@@ -126,7 +160,11 @@ class PhysicsOptimizer:
                         _add_contact_point(joint_name, joint_id, pos, point_i, point_map)
                 continue
 
-            # 旧结构/其它关节：维持原来的接触判定与固定4点
+            # 旧结构/其它关节：维持论文的“接触判定 + 固定4点facet contact”
+            # 论文 Contact Determination（Page 5）要点：
+            # - 脚：df < 0.5cm 或 (df < 3cm 且 接触概率 cf > 0.5)
+            # - 非脚：dn < 0.5cm
+            # 这里把“距离”用 pos[1] 与 floor_y 的差近似，3cm 对应 floor_y + 0.03，0.5cm 近似为 pos[1] <= floor_y。
             if (joint_id == Body.LFOOT and foot_stable[0] > 0.5 and pos[1] <= self.params['floor_y'] + 0.03) or \
                (joint_id == Body.RFOOT and foot_stable[1] > 0.5 and pos[1] <= self.params['floor_y'] + 0.03) or \
                (pos[1] <= self.params['floor_y']):
@@ -143,6 +181,14 @@ class PhysicsOptimizer:
         Js = np.vstack(Js)
         nc = len(collision_points)
 
+        # === QP组装方式（对应论文 Eq.7 的 E_PD + E_reg）===
+        # 这里把目标拆成三块最小二乘：
+        #   - 对 q̈：  Σ ||A1 q̈ - b1||^2   -> E_PD
+        #   - 对 λ：  Σ ||A2 λ - b2||^2    -> E_λ（Eq.9）
+        #   - 对 τ：  Σ ||A3 τ - b3||^2    -> E_res, E_τ（Eq.9）
+        #
+        # 最终通过 P=AᵀA, q= -Aᵀb 转成标准QP：min 1/2 xᵀ P x + qᵀ x
+        #
         # minimize   ||A1 * qddot - b1||^2     for A1, b1 in zip(As1, bs1)
         #            + ||A2 * lambda - b2||^2  for A2, b2 in zip(As2, bs2)
         #            + ||A3 * tau - b3||^2     for A3, b3 in zip(As3, bs3)
@@ -156,7 +202,10 @@ class PhysicsOptimizer:
                                        [np.empty(0)], [np.zeros((0, self.model.qdot_size))], [np.empty(0)]
         A_, b_ = None, None
 
-        # joint angle PD controller（对应论文公式3）
+        # === Dual PD Controller Term E_PD ===
+        # 1) Joint Rotation Controller（论文 Sec.3.2.2，公式给出 θ̈_des = kpθ( E(φ) - θ ) - kdθ θ̇）
+        #    对应论文中 Eθ = || q̈[3:] - θ̈_des ||^2 （Sec.3.2.3, Page 6）
+        #    这里用 angle_difference(...) 实现 (E(φ) - θ) 的角度差，并通过 A 选出 q̈ 的角速度部分。
         if True:
             A = np.hstack((np.zeros((self.model.qdot_size - 3, 3)), np.eye((self.model.qdot_size - 3))))
             b = self.params['kp_angular'] * art.math.angle_difference(q_ref[3:], q[3:]) - self.params['kd_angular'] * qdot[3:]
@@ -178,7 +227,14 @@ class PhysicsOptimizer:
                 As1.append(A * 2)
                 bs1.append(b * 2)
 
-        # joint position PD controller (using joint velocity to determine target joint position)（论文公式5）
+        # 2) Joint Position Controller（论文 Sec.3.2.2, Eq.(4)(5)）
+        #    论文：r_ref = r + T(v) Δt (Eq.4),  r̈_des = kp_r(r_ref - r) - kd_r ṙ (Eq.5)
+        #    并在优化器里用 Er = || J q̈ + Jdot qdot - r̈_des ||^2 （Sec.3.2.3, Page 6）
+        #
+        #    实现细节：
+        #    - A 取点Jacobian J
+        #    - self.model.calc_point_acceleration(q, qdot, 0, ...) 在 q̈=0 时主要贡献 Jdot*qdot
+        #      因此 b = -(Jdot*qdot) + r̈_des，使得 (J q̈ + Jdot qdot) ≈ r̈_des
         if True:
             for joint_name, v in zip(['ROOT', 'LHIP', 'RHIP', 'SPINE1', 'LKNEE', 'RKNEE', 'SPINE2', 'LANKLE', 'RANKLE',
                                       'SPINE3', 'LFOOT', 'RFOOT', 'NECK', 'LCLAVICLE', 'RCLAVICLE', 'HEAD', 'LSHOULDER',
@@ -219,7 +275,10 @@ class PhysicsOptimizer:
             As2.append(np.eye(nc * 3) * self.params['coeff_lambda_old'])
             bs2.append(np.zeros(nc * 3))
 
-        # Signorini’s conditions of lambda对应论文公式9中的E_lambda
+        # === Regularization Term E_reg（论文 Eq.(9)）===
+        # Eλ：惩罚违反 Signorini 接触条件的力（论文写作：Eλ = Σ_c d_c ||λ_c||^2）
+        # 直觉：接触点离地越高（d_c 越大），越不该产生接触力；接近地面/轻微穿透时允许力支撑。
+        # 这里用 A = diag(d_c I_3) 实现：||A λ||^2 = Σ_c d_c^2 ||λ_c||^2（与论文形式等价到权重尺度上）
         if True:
             if nc != 0:
                 A = [np.eye(3) * max(cp[1] - self.params['floor_y'], 0.005) for cp in collision_points]
@@ -227,15 +286,20 @@ class PhysicsOptimizer:
                 As2.append(A * self.params['coeff_lambda'])
                 bs2.append(np.zeros(nc * 3))
 
-        # tau size(包含残余力约束)
+        # E_res 与 E_τ：对 τ 的L2正则（论文 Eq.(9)：Eres = ||τ[:6]||^2, Eτ = ||τ[6:]||^2）
+        # 说明：论文权重默认 k_res=0.1, k_τ=0.01；这里对应 physics_parameters.json 中 coeff_virtual/coeff_tau。
+        # [Repo扩展/非论文] 这里对 residual force 额外乘了 3.16（经验尺度因子，用于数值/单位匹配与稳定性调参）。
         if True:
             As3.append(art.math.block_diagonal_matrix_np([
-                np.eye(6) * self.params['coeff_virtual'] * 3.16, # 对应论文中的残余力约束
+                np.eye(6) * self.params['coeff_virtual'], # 对应论文中的残余力约束
                 np.eye(self.model.qdot_size - 6) * self.params['coeff_tau']#关节扭矩约束
             ]))
             bs3.append(np.zeros(self.model.qdot_size))
 
-        # contacting body joint velocity
+        # === Sliding / Anti-penetration Constraints（论文 Eq.7: ṙ_j(q̈) ∈ C, Page 6）===
+        # 论文：对“接触关节”的速度施加边界，水平滑动速度 < σ，同时防止向下穿透。
+        # 实现：使用离散时间近似 v_{t+1} ≈ v_t + Δt * J * q̈，将速度范围改写成 q̈ 的线性不等式。
+        # 这里先对非脚关节（test_contact_joints[:-2]）在低于地面时施加较宽松的盒约束。
         if True:
             for joint_name in self.test_contact_joints[:-2]:
                 joint_id = vars(Body)[joint_name]
@@ -248,7 +312,9 @@ class PhysicsOptimizer:
                     Gs1.append(self.params['delta_t'] * J)
                     hs1.append(-v + [1e-1, 1e2, 1e-1])
 
-        # contacting foot velocity
+        # 对脚关节的无滑动约束：用 stable（论文中的 contact probability c，经 sigmoid 后 ∈ (0,1)）自适应阈值。
+        # stable 越大 -> 越“确信在接触” -> th 越小（更严格的无滑动）；stable 越小 -> th 越大（更宽松）。
+        # [Repo扩展/非论文] safe_stable 的裁剪用于避免 log(0)/数值爆炸（工程保护，不影响论文主思想）。
         if True:
             for joint_name, stable in zip(['LFOOT', 'RFOOT'], foot_stable):
                 joint_id = vars(Body)[joint_name]
@@ -269,15 +335,25 @@ class PhysicsOptimizer:
                 Gs1.append(self.params['delta_t'] * J)
                 hs1.append(-v + [th, max(th, th_y) + 1e-6, th])
 
-        # GRF friction cone constraint
+        # === Friction Cone Constraint（论文 Eq.7: λ ∈ F, Page 6）===
+        # 论文指出摩擦锥可线性化以保持QP；这里用4个半空间拼成“金字塔”近似库仑摩擦锥（μ=0.6）。
         if True:
             if nc > 0:
                 Gs2.append(art.math.block_diagonal_matrix_np([self.friction_constraint_matrix] * nc))
                 hs2.append(np.zeros(nc * 4))
 
-        # 额外约束：接触点持续接触时，对力的变化做约束，让接触力平滑（减少抖动）
+        # [Repo扩展/非论文] 虚拟力方向约束：不允许出现“向下”的残余力分量
+        # 约束形式：tau_y >= 0  <=>  -tau_y <= 0
+        # 说明：tau[:6] 为 root residual（通常可理解为 [Fx,Fy,Fz,Tx,Ty,Tz]），这里约束第2维(Fy)非负。
+        if True:
+            row = np.zeros(self.model.qdot_size, dtype=np.float64)
+            row[1] = -1.0
+            Gs3.append(row.reshape(1, -1))
+            hs3.append(np.array([0.0], dtype=np.float64))
+
+        # [Repo扩展/非论文] 额外约束：接触点持续接触时，对 λ 的跨帧变化做不等式约束，让接触力更平滑（减少抖动）
         # 说明：
-        # - 这里只使用线性不等式约束（对每个分量做上下界），兼顾“方向”和“大小”不要和上一帧差太多
+        # - 这里只使用线性不等式约束，兼顾“方向”和“大小”不要和上一帧差太多
         # - 仅当同一个接触点在上一帧也存在（持续接触）时才添加
         if True:
             if nc > 0 and isinstance(self.prev_contact_forces, dict) and len(self.prev_contact_forces) > 0:
@@ -299,55 +375,41 @@ class PhysicsOptimizer:
                      
                     f_norm = np.linalg.norm(prev_f)
 
-                    # 如果上一帧力太小，方向不稳定，退化为简单Box约束
+                    # 如果上一帧力太小，方向不稳定：不对下一帧力做大小约束（避免接触刚建立/消失时被钳制）
                     if f_norm > 1e-3:
                         u = prev_f / f_norm
                         
-                        # 1. 方向约束：控制在120度以内 (cos(120) = -0.5)
-                        # f · u >= -0.5 * |f_prev|  =>  -f · u <= 0.5 * |f_prev|
+                        # 1) 方向约束：控制在120度以内 (cos(120) = -0.5)
+                        #    f · u >= -0.5 * |f_prev|  <=>  -f · u <= 0.5 * |f_prev|
                         row_dir = np.zeros(nc * 3, dtype=np.float64)
                         row_dir[i * 3 : i * 3 + 3] = -u
                         smooth_rows.append(row_dir)
                         smooth_rhs.append(0.5 * f_norm)
                         
-                        # 2. 大小约束：大小相差不剧烈
-                        # 限制沿原方向的投影上限
-                        # f · u <= (1 + smooth_rel) * |f_prev| (稍微放宽一点)
-                        mag_scale = 1.0 + max(smooth_rel, 0.5)
-                        row_mag = np.zeros(nc * 3, dtype=np.float64)
-                        row_mag[i * 3 : i * 3 + 3] = u
-                        smooth_rows.append(row_mag)
-                        smooth_rhs.append(mag_scale * f_norm)
-                        
-                        # 3. 宽松的Box约束：防止垂直分量发散
-                        # |f - f_prev| <= |f_prev| + smooth_abs
-                        safe_margin = f_norm + smooth_abs
-                        for k in range(3):
-                            row_box = np.zeros(nc * 3, dtype=np.float64)
-                            row_box[i * 3 + k] = 1.0
-                            smooth_rows.append(row_box)
-                            smooth_rhs.append(prev_f[k] + safe_margin)
-                            smooth_rows.append(-row_box)
-                            smooth_rhs.append(-(prev_f[k] - safe_margin))
+                        # 2) magnitude 约束（线性近似）：限制当前力的“大小”不要相对上一帧变化太多
+                        #    这里用沿 u 方向的投影近似 magnitude：u^T f ≈ ||f||（当方向不偏离太多时成立）。
+                        #    直接约束：|u^T f - ||f_prev|| | <= delta，其中 delta = smooth_abs + smooth_rel * ||f_prev||
+                        delta = smooth_abs + smooth_rel * f_norm
+                        # u^T f <= ||f_prev|| + delta
+                        row_mag_up = np.zeros(nc * 3, dtype=np.float64)
+                        row_mag_up[i * 3 : i * 3 + 3] = u
+                        smooth_rows.append(row_mag_up)
+                        smooth_rhs.append(f_norm + delta)
+                        # -(u^T f) <= -(||f_prev|| - delta)  <=>  u^T f >= ||f_prev|| - delta
+                        row_mag_lo = -row_mag_up
+                        smooth_rows.append(row_mag_lo)
+                        smooth_rhs.append(-(f_norm - delta))
                             
                     else:
-                        # 对每个分量施加 |f - f_prev| <= abs + rel*|f_prev|
-                        for k in range(3):
-                            delta = smooth_abs + smooth_rel * abs(float(prev_f[k]))
-                            # +f <= f_prev + delta
-                            row = np.zeros(nc * 3, dtype=np.float64)
-                            row[i * 3 + k] = 1.0
-                            smooth_rows.append(row)
-                            smooth_rhs.append(float(prev_f[k]) + delta)
-                            # -f <= -(f_prev - delta)
-                            smooth_rows.append(-row)
-                            smooth_rhs.append(-(float(prev_f[k]) - delta))
+                        continue
 
                 if smooth_rows:
                     Gs2.append(np.vstack(smooth_rows))
                     hs2.append(np.asarray(smooth_rhs, dtype=np.float64))
 
-        # equation of motion (equality constraint)
+        # === Equation of Motion（论文 Eq.7: M q̈ + h = Jcᵀ λ + τ）===
+        # 将动力学方程写成线性等式约束 A_ x = b_：
+        #   [-M,  Jᵀ,  I] [q̈, λ, τ]ᵀ = h
         if True:
             M = self.model.calc_M(q)
             h = self.model.calc_h(q, qdot)
@@ -446,9 +508,13 @@ class PhysicsOptimizer:
                     else:
                         print(f"GRF component [Unknown - point {i}]: "
                               f"X: {point_force[0]:.6f}, Y: {point_force[1]:.6f}, Z: {point_force[2]:.6f}")
+        # === Dynamic State Updates（论文 Sec.3.2.4）===
+        # 论文用有限差分更新：qdot_{t+1} = qdot_t + q̈ Δt,  q_{t+1} = q_t + qdot_{t+1} Δt
         qdot = qdot + qddot * self.params['delta_t']
         q = q + qdot * self.params['delta_t']
-        #self.q = q
+        # [Repo实现差异] 这里最终把 self.q 直接回贴到 q_ref（而非积分得到的 q），属于工程折中：
+        # - 好处：姿态更贴近网络输出，减少积分漂移；
+        # - 代价：动力学积分状态与输出姿态不完全一致（但 qdot/λ/τ 仍来自QP）。
         self.q = q_ref.copy()
         self.qdot = qdot
         self.last_x = x
