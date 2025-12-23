@@ -296,18 +296,52 @@ class PhysicsOptimizer:
                     if prev_f is None:
                         continue  # 新接触点：不加平滑约束
                     prev_f = np.asarray(prev_f, dtype=np.float64).reshape(3)
+                     
+                    f_norm = np.linalg.norm(prev_f)
 
-                    # 对每个分量施加 |f - f_prev| <= abs + rel*|f_prev|
-                    for k in range(3):
-                        delta = smooth_abs + smooth_rel * abs(float(prev_f[k]))
-                        # +f <= f_prev + delta
-                        row = np.zeros(nc * 3, dtype=np.float64)
-                        row[i * 3 + k] = 1.0
-                        smooth_rows.append(row)
-                        smooth_rhs.append(float(prev_f[k]) + delta)
-                        # -f <= -(f_prev - delta)
-                        smooth_rows.append(-row)
-                        smooth_rhs.append(-(float(prev_f[k]) - delta))
+                    # 如果上一帧力太小，方向不稳定，退化为简单Box约束
+                    if f_norm > 1e-3:
+                        u = prev_f / f_norm
+                        
+                        # 1. 方向约束：控制在120度以内 (cos(120) = -0.5)
+                        # f · u >= -0.5 * |f_prev|  =>  -f · u <= 0.5 * |f_prev|
+                        row_dir = np.zeros(nc * 3, dtype=np.float64)
+                        row_dir[i * 3 : i * 3 + 3] = -u
+                        smooth_rows.append(row_dir)
+                        smooth_rhs.append(0.5 * f_norm)
+                        
+                        # 2. 大小约束：大小相差不剧烈
+                        # 限制沿原方向的投影上限
+                        # f · u <= (1 + smooth_rel) * |f_prev| (稍微放宽一点)
+                        mag_scale = 1.0 + max(smooth_rel, 0.5)
+                        row_mag = np.zeros(nc * 3, dtype=np.float64)
+                        row_mag[i * 3 : i * 3 + 3] = u
+                        smooth_rows.append(row_mag)
+                        smooth_rhs.append(mag_scale * f_norm)
+                        
+                        # 3. 宽松的Box约束：防止垂直分量发散
+                        # |f - f_prev| <= |f_prev| + smooth_abs
+                        safe_margin = f_norm + smooth_abs
+                        for k in range(3):
+                            row_box = np.zeros(nc * 3, dtype=np.float64)
+                            row_box[i * 3 + k] = 1.0
+                            smooth_rows.append(row_box)
+                            smooth_rhs.append(prev_f[k] + safe_margin)
+                            smooth_rows.append(-row_box)
+                            smooth_rhs.append(-(prev_f[k] - safe_margin))
+                            
+                    else:
+                        # 对每个分量施加 |f - f_prev| <= abs + rel*|f_prev|
+                        for k in range(3):
+                            delta = smooth_abs + smooth_rel * abs(float(prev_f[k]))
+                            # +f <= f_prev + delta
+                            row = np.zeros(nc * 3, dtype=np.float64)
+                            row[i * 3 + k] = 1.0
+                            smooth_rows.append(row)
+                            smooth_rhs.append(float(prev_f[k]) + delta)
+                            # -f <= -(f_prev - delta)
+                            smooth_rows.append(-row)
+                            smooth_rhs.append(-(float(prev_f[k]) - delta))
 
                 if smooth_rows:
                     Gs2.append(np.vstack(smooth_rows))
