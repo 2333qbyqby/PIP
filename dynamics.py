@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import pybullet as p
 import articulate as art
+import xml.etree.ElementTree as ET
 from typing import Optional
 from articulate.utils.bullet import *
 from articulate.utils.rbdl import *
@@ -48,6 +49,13 @@ class PhysicsOptimizer:
         self.debug = debug
         self.model = RBDLModel(paths.physics_model_file, update_kinematics_by_hand=True)
         self.params = read_debug_param_values_from_json(paths.physics_parameter_file)
+
+        # 角色质量/重力（用于把“几倍重力/体重”转换成牛顿）
+        # - 优先使用 physics_parameters.json 里的 body_mass_kg（便于你手动校准单位/比例）
+        # - 否则从 URDF 的 inertial.mass 汇总得到总质量
+        self.gravity = float(self.params.get('gravity', 9.81))
+        self.body_mass_kg = self._get_body_mass_kg(paths.physics_model_file)
+
         self.friction_constraint_matrix = np.array([[np.sqrt(2), -mu, 0],
                                                     [-np.sqrt(2), -mu, 0],
                                                     [0, -mu, np.sqrt(2)],
@@ -75,6 +83,39 @@ class PhysicsOptimizer:
         self.prev_left_foot_grf = None
         self.prev_right_foot_grf = None
         self.reset_states()
+
+    @staticmethod
+    def _calc_total_mass_from_urdf(urdf_file_path: str) -> float:
+        """
+        计算URDF文件中所有 link/inertial/mass 的总质量（kg）。
+        """
+        tree = ET.parse(urdf_file_path)
+        root = tree.getroot()
+        total_mass = 0.0
+        for link in root.findall('link'):
+            inertial = link.find('inertial')
+            if inertial is None:
+                continue
+            mass_element = inertial.find('mass')
+            if mass_element is None:
+                continue
+            mass_value = mass_element.get('value')
+            if mass_value is None:
+                continue
+            try:
+                total_mass += float(str(mass_value).strip().strip('"').strip("'"))
+            except ValueError:
+                continue
+        return float(total_mass)
+
+    def _get_body_mass_kg(self, urdf_file_path: str) -> float:
+        m = float(self.params.get('body_mass_kg', 0.0))
+        if m > 0.0:
+            return m
+        try:
+            return self._calc_total_mass_from_urdf(urdf_file_path)
+        except Exception:
+            return 0.0
 
     def reset_states(self):
         self.last_x = []
