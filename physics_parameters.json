@@ -55,14 +55,19 @@
         "max": 1,
         "value": 0.01
     }, {
-        "name": "contact_force_smooth_abs",
+        "name": "virtual_force_norm_max",
         "min": 0,
-        "max": 500,
-        "value": 0
+        "max": 5000,
+        "value": 500
     }, {
-        "name": "contact_force_smooth_rel",
+        "name": "contact_total_force_gate_eps",
         "min": 0,
-        "max": 2,
-        "value": 1.01
+        "max": 10,
+        "value": 0.001
+    }, {
+        "name": "contact_total_force_smooth_coeff",
+        "min": 0,
+        "max": 50,
+        "value": 0.1
     }
 ]

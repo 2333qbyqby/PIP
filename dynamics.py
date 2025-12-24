@@ -71,6 +71,9 @@ class PhysicsOptimizer:
         self.qdot = np.zeros(self.model.qdot_size)
         # 上一帧接触点的力（用于平滑约束），key = (joint_name, point_label)，value = np.ndarray shape(3,)
         self.prev_contact_forces = {}
+        # 上一帧左右脚各自的脚底合力（用于门控）；shape(3,)
+        self.prev_left_foot_grf = None
+        self.prev_right_foot_grf = None
         self.reset_states()
 
     def reset_states(self):
@@ -78,6 +81,8 @@ class PhysicsOptimizer:
         self.q = None
         self.qdot = np.zeros(self.model.qdot_size)
         self.prev_contact_forces = {}
+        self.prev_left_foot_grf = None
+        self.prev_right_foot_grf = None
 
     def optimize_frame(self, pose, jvel, contact, acc):
         # === 论文符号对照 ===
@@ -286,15 +291,91 @@ class PhysicsOptimizer:
                 As2.append(A * self.params['coeff_lambda'])
                 bs2.append(np.zeros(nc * 3))
 
+        # [Repo扩展/非论文] 左/右脚“合力跨帧平滑”（soft penalty，而非 hard 约束）
+        # 目标项：E_F = ||F - F_prev||^2，其中 F = Σ_{i in foot} f_i （对左右脚分别计算）
+        # 实现为最小二乘：|| (c * R) * λ - (c * F_prev) ||^2
+        # - R 是 3 x (3*nc) 的线性求和矩阵，每行对应 x/y/z 分量的求和
+        # - c 是可调系数（越大越“粘”上一帧，越平滑但可能影响快速换步）
+        if True:
+            if nc > 0:
+                # 统一门控逻辑：
+                # - prev_F 太小：认为上一帧无有效接触，不加“跨帧合力”项/约束，避免抬脚时被硬拉
+                # - stable 低于阈值：认为该脚本帧不稳定/不接触，不加项（阈值为0时等价于不启用此门控）
+                eps = float(self.params.get('contact_total_force_gate_eps', 1e-3))
+                def _build_total_force_sum_matrix(foot_indices):
+                    """
+                    构造 F = R * λ 的线性求和矩阵 R（3 x (3*nc)）。
+                    其中 foot_indices 是 collision_points 中属于某只脚的点索引集合。
+                    """
+                    if foot_indices is None:
+                        return None
+                    idxs = sorted({int(i) for i in foot_indices if 0 <= int(i) < nc})
+                    if len(idxs) == 0:
+                        return None
+                    R = np.zeros((3, nc * 3), dtype=np.float64)
+                    for i in idxs:
+                        R[0, i * 3 + 0] = 1.0
+                        R[1, i * 3 + 1] = 1.0
+                        R[2, i * 3 + 2] = 1.0
+                    return R
+
+                def _should_apply_total_force_term(prev_F, foot_indices, stable: float) -> bool:
+                    if prev_F is None:
+                        return False
+                    if foot_indices is None or len(foot_indices) == 0:
+                        return False
+                    if np.linalg.norm(np.asarray(prev_F, dtype=np.float64).reshape(3)) <= eps:
+                        return False
+                    return True
+
+                # soft penalty（最小二乘项）
+                total_force_coeff = float(self.params.get('contact_total_force_smooth_coeff', 0.0))
+                if total_force_coeff > 0.0:
+                    def _add_foot_total_force_smooth_term(foot_indices, prev_F, stable: float):
+                        if not _should_apply_total_force_term(prev_F, foot_indices, stable=stable):
+                            return
+                        R = _build_total_force_sum_matrix(foot_indices)
+                        if R is None:
+                            return
+                        prev_F = np.asarray(prev_F, dtype=np.float64).reshape(3)
+                        As2.append(R * total_force_coeff)
+                        bs2.append(prev_F * total_force_coeff)
+
+                    left_indices = sorted(left_point_to_collision_idx.values())
+                    right_indices = sorted(right_point_to_collision_idx.values())
+                    _add_foot_total_force_smooth_term(left_indices, self.prev_left_foot_grf, stable=float(foot_stable[0]))
+                    _add_foot_total_force_smooth_term(right_indices, self.prev_right_foot_grf, stable=float(foot_stable[1]))
+
         # E_res 与 E_τ：对 τ 的L2正则（论文 Eq.(9)：Eres = ||τ[:6]||^2, Eτ = ||τ[6:]||^2）
         # 说明：论文权重默认 k_res=0.1, k_τ=0.01；这里对应 physics_parameters.json 中 coeff_virtual/coeff_tau。
         # [Repo扩展/非论文] 这里对 residual force 额外乘了 3.16（经验尺度因子，用于数值/单位匹配与稳定性调参）。
         if True:
             As3.append(art.math.block_diagonal_matrix_np([
-                np.eye(6) * self.params['coeff_virtual'], # 对应论文中的残余力约束
+                np.eye(6) * self.params['coeff_virtual']* 3.16, # 对应论文中的残余力约束
                 np.eye(self.model.qdot_size - 6) * self.params['coeff_tau']#关节扭矩约束
             ]))
             bs3.append(np.zeros(self.model.qdot_size))
+
+        # [Repo扩展/非论文] 约束虚拟力（tau[:3]）的“模长”上限（只处理前三维）
+        # 说明：
+        # - 真实的 L2 范数约束 ||tau[:3]||_2 <= r 属于二阶锥约束（SOCP），普通QP求解器不支持。
+        # - 这里用保守的线性近似：对每个分量施加盒约束 |tau_i| <= r/sqrt(3)，从而保证 ||tau[:3]||_2 <= r。
+        # - 若你希望更“贴近球形”的近似，需要引入更多方向的线性面或切换SOCP求解器。
+        if True:
+            vf_norm_max = float(self.params.get('virtual_force_norm_max', 0.0))
+            if vf_norm_max > 0.0:
+                bound = vf_norm_max / np.sqrt(3.0)
+                rows = []
+                rhs = []
+                for i in range(3):
+                    row = np.zeros(self.model.qdot_size, dtype=np.float64)
+                    row[i] = 1.0
+                    rows.append(row)
+                    rhs.append(bound)
+                    rows.append(-row)
+                    rhs.append(bound)
+                Gs3.append(np.vstack(rows))
+                hs3.append(np.asarray(rhs, dtype=np.float64))
 
         # === Sliding / Anti-penetration Constraints（论文 Eq.7: ṙ_j(q̈) ∈ C, Page 6）===
         # 论文：对“接触关节”的速度施加边界，水平滑动速度 < σ，同时防止向下穿透。
@@ -341,71 +422,6 @@ class PhysicsOptimizer:
             if nc > 0:
                 Gs2.append(art.math.block_diagonal_matrix_np([self.friction_constraint_matrix] * nc))
                 hs2.append(np.zeros(nc * 4))
-
-        # [Repo扩展/非论文] 虚拟力方向约束：不允许出现“向下”的残余力分量
-        # 约束形式：tau_y >= 0  <=>  -tau_y <= 0
-        # 说明：tau[:6] 为 root residual（通常可理解为 [Fx,Fy,Fz,Tx,Ty,Tz]），这里约束第2维(Fy)非负。
-        if True:
-            row = np.zeros(self.model.qdot_size, dtype=np.float64)
-            row[1] = -1.0
-            Gs3.append(row.reshape(1, -1))
-            hs3.append(np.array([0.0], dtype=np.float64))
-
-        # [Repo扩展/非论文] 额外约束：接触点持续接触时，对 λ 的跨帧变化做不等式约束，让接触力更平滑（减少抖动）
-        # 说明：
-        # - 这里只使用线性不等式约束，兼顾“方向”和“大小”不要和上一帧差太多
-        # - 仅当同一个接触点在上一帧也存在（持续接触）时才添加
-        if True:
-            if nc > 0 and isinstance(self.prev_contact_forces, dict) and len(self.prev_contact_forces) > 0:
-                # 参数：绝对变化上限 + 相对变化上限（越大越松，越不容易导致QP不可行）
-                smooth_abs = float(self.params.get('contact_force_smooth_abs', 50.0))
-                smooth_rel = float(self.params.get('contact_force_smooth_rel', 0.5))
-
-                smooth_rows = []
-                smooth_rhs = []
-
-                for i in range(nc):
-                    if i >= len(collision_point_meta):
-                        continue
-                    key = collision_point_meta[i]  # (joint_name, point_label)
-                    prev_f = self.prev_contact_forces.get(key, None)
-                    if prev_f is None:
-                        continue  # 新接触点：不加平滑约束
-                    prev_f = np.asarray(prev_f, dtype=np.float64).reshape(3)
-                     
-                    f_norm = np.linalg.norm(prev_f)
-
-                    # 如果上一帧力太小，方向不稳定：不对下一帧力做大小约束（避免接触刚建立/消失时被钳制）
-                    if f_norm > 1e-3:
-                        u = prev_f / f_norm
-                        
-                        # 1) 方向约束：控制在120度以内 (cos(120) = -0.5)
-                        #    f · u >= -0.5 * |f_prev|  <=>  -f · u <= 0.5 * |f_prev|
-                        row_dir = np.zeros(nc * 3, dtype=np.float64)
-                        row_dir[i * 3 : i * 3 + 3] = -u
-                        smooth_rows.append(row_dir)
-                        smooth_rhs.append(0.5 * f_norm)
-                        
-                        # 2) magnitude 约束（线性近似）：限制当前力的“大小”不要相对上一帧变化太多
-                        #    这里用沿 u 方向的投影近似 magnitude：u^T f ≈ ||f||（当方向不偏离太多时成立）。
-                        #    直接约束：|u^T f - ||f_prev|| | <= delta，其中 delta = smooth_abs + smooth_rel * ||f_prev||
-                        delta = smooth_abs + smooth_rel * f_norm
-                        # u^T f <= ||f_prev|| + delta
-                        row_mag_up = np.zeros(nc * 3, dtype=np.float64)
-                        row_mag_up[i * 3 : i * 3 + 3] = u
-                        smooth_rows.append(row_mag_up)
-                        smooth_rhs.append(f_norm + delta)
-                        # -(u^T f) <= -(||f_prev|| - delta)  <=>  u^T f >= ||f_prev|| - delta
-                        row_mag_lo = -row_mag_up
-                        smooth_rows.append(row_mag_lo)
-                        smooth_rhs.append(-(f_norm - delta))
-                            
-                    else:
-                        continue
-
-                if smooth_rows:
-                    Gs2.append(np.vstack(smooth_rows))
-                    hs2.append(np.asarray(smooth_rhs, dtype=np.float64))
 
         # === Equation of Motion（论文 Eq.7: M q̈ + h = Jcᵀ λ + τ）===
         # 将动力学方程写成线性等式约束 A_ x = b_：
@@ -472,8 +488,15 @@ class PhysicsOptimizer:
                 key = collision_point_meta[i]
                 new_prev[key] = grf_components_for_state[i].copy()
             self.prev_contact_forces = new_prev
+            # 只统计脚底点（左右脚各4点）各自合力，忽略其它接触点
+            left_indices = sorted(left_point_to_collision_idx.values())
+            right_indices = sorted(right_point_to_collision_idx.values())
+            self.prev_left_foot_grf = np.sum(grf_components_for_state[left_indices], axis=0).copy() if len(left_indices) > 0 else None
+            self.prev_right_foot_grf = np.sum(grf_components_for_state[right_indices], axis=0).copy() if len(right_indices) > 0 else None
         else:
             self.prev_contact_forces = {}
+            self.prev_left_foot_grf = None
+            self.prev_right_foot_grf = None
 
         # 添加调试信息，打印 tau 和 GRF 的形状
         if self.debug:
