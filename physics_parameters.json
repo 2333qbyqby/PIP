@@ -58,7 +58,7 @@
         "name": "virtual_force_norm_max",
         "min": 0,
         "max": 5000,
-        "value": 500
+        "value": 200
     }, {
         "name": "contact_total_force_gate_eps",
         "min": 0,
@@ -69,5 +69,15 @@
         "min": 0,
         "max": 50,
         "value": 0.1
+    }, {
+        "name": "max_total_grf_y_multiple",
+        "min": 0,
+        "max": 10,
+        "value": 3.0
+    }, {
+        "name": "min_total_grf_y_multiple",
+        "min": 0,
+        "max": 10,
+        "value": 1.0
     }
 ]

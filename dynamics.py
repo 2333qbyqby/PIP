@@ -464,6 +464,39 @@ class PhysicsOptimizer:
                 Gs2.append(art.math.block_diagonal_matrix_np([self.friction_constraint_matrix] * nc))
                 hs2.append(np.zeros(nc * 4))
 
+        # === [Repo扩展] Total GRF Y Upper Bound（硬约束）===
+        # 约束“所有接触点地面反力”的法向（Y轴）合力上限：
+        #   Σ_i Fy_i <= k * m * g
+        # - k 通过 physics_parameters.json 的 max_total_grf_y_multiple 配置（默认建议 3.0）
+        # - m 为 self.body_mass_kg（优先读取 params['body_mass_kg']，否则从URDF惯性质量汇总）
+        # - 这是线性不等式，可直接加到 λ 的 Gx<=h 里（G2 * lambda <= h2）
+        if True:
+            if nc > 0:
+                k = float(self.params.get('max_total_grf_y_multiple', 0.0))
+                if k > 0.0 and float(self.body_mass_kg) > 0.0 and float(self.gravity) > 0.0:
+                    fy_max = k * float(self.body_mass_kg) * float(self.gravity)
+                    # λ 排列为 [Fx0,Fy0,Fz0, Fx1,Fy1,Fz1, ...]，因此取每个点的 Fy 分量求和
+                    row = np.zeros((nc * 3,), dtype=np.float64)
+                    row[1::3] = 1.0
+                    Gs2.append(row.reshape(1, -1))
+                    hs2.append(np.asarray([fy_max], dtype=np.float64))
+
+        # === [Repo扩展] Total GRF Y Lower Bound（硬约束）===
+        # 同时给“所有接触点地面反力”的法向（Y轴）合力加下限（至少为一倍重力）：
+        #   Σ_i Fy_i >= k_min * m * g
+        # 写成 QP 标准形式 Gx<=h：
+        #   -Σ_i Fy_i <= -k_min * m * g
+        # - k_min 通过 physics_parameters.json 的 min_total_grf_y_multiple 配置（默认 1.0）
+        if True:
+            if nc > 0:
+                k_min = float(self.params.get('min_total_grf_y_multiple', 0.0))
+                if k_min > 0.0 and float(self.body_mass_kg) > 0.0 and float(self.gravity) > 0.0:
+                    fy_min = k_min * float(self.body_mass_kg) * float(self.gravity)
+                    row = np.zeros((nc * 3,), dtype=np.float64)
+                    row[1::3] = -1.0
+                    Gs2.append(row.reshape(1, -1))
+                    hs2.append(np.asarray([-fy_min], dtype=np.float64))
+
         # === Equation of Motion（论文 Eq.7: M q̈ + h = Jcᵀ λ + τ）===
         # 将动力学方程写成线性等式约束 A_ x = b_：
         #   [-M,  Jᵀ,  I] [q̈, λ, τ]ᵀ = h
