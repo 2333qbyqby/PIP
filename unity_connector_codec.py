@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Union, Any
+
+
+GrfPayload = Union[List[float], Dict[str, Any], None]
+
+
+@dataclass(frozen=True)
+class UnityIncomingFrame:
+    pose: List[float]
+    tran: List[float]
+    contact: List[float]
+    velocity: List[float]
+
+
+@dataclass(frozen=True)
+class UnityOutgoingFrame:
+    pose: List[float]
+    tran: List[float]
+    grf: GrfPayload
+    tau: Optional[List[float]] = None
+
+
+class UnityMessageCodec:
+    """
+    Unity <-> Python 消息编解码（字符串协议）.
+
+    发送（Python -> Unity）:
+      pose#tran#grf#tau$
+
+    接收（Unity -> Python）:
+      pose#tran#contact#velocity$
+    """
+
+    DELIM_END = "$"
+    DELIM_SECTION = "#"
+    DELIM_FLOAT = ","
+
+    def pack_outgoing(
+        self,
+        pose_data: List[float],
+        tran_data: List[float],
+        grf_data: GrfPayload = None,
+        tau_data: Optional[List[float]] = None,
+    ) -> str:
+        pose_str = self.DELIM_FLOAT.join(["%g" % float(v) for v in (pose_data or [])])
+        tran_str = self.DELIM_FLOAT.join(["%g" % float(v) for v in (tran_data or [])])
+
+        # GRF：兼容旧格式(list[float]) 与新格式(dict)
+        if isinstance(grf_data, dict):
+            flattened_grf: List[float] = []
+
+            if "left_foot" in grf_data:
+                for point_data in grf_data["left_foot"]:
+                    flattened_grf.extend(point_data.get("force", [0.0, 0.0, 0.0]))
+            else:
+                flattened_grf.extend([0.0, 0.0, 0.0] * 4)
+
+            if "right_foot" in grf_data:
+                for point_data in grf_data["right_foot"]:
+                    flattened_grf.extend(point_data.get("force", [0.0, 0.0, 0.0]))
+            else:
+                flattened_grf.extend([0.0, 0.0, 0.0] * 4)
+
+            grf_str = self.DELIM_FLOAT.join(["%g" % float(v) for v in flattened_grf])
+        elif grf_data:
+            grf_str = self.DELIM_FLOAT.join(["%g" % float(v) for v in grf_data])  # type: ignore[arg-type]
+        else:
+            grf_str = ""
+
+        tau_str = (
+            self.DELIM_FLOAT.join(["%g" % float(v) for v in tau_data])
+            if tau_data is not None and len(tau_data) > 0
+            else ""
+        )
+
+        return f"{pose_str}{self.DELIM_SECTION}{tran_str}{self.DELIM_SECTION}{grf_str}{self.DELIM_SECTION}{tau_str}{self.DELIM_END}"
+
+    def parse_incoming(self, packet: str) -> UnityIncomingFrame:
+        # 移除末尾结束符
+        data = packet.rstrip(self.DELIM_END)
+        parts = data.split(self.DELIM_SECTION)
+        if len(parts) != 4:
+            raise ValueError(f"数据格式错误：期望4个部分，实际收到{len(parts)}个部分")
+
+        pose_str, tran_str, contact_str, velocity_str = parts
+        pose = [float(x) for x in pose_str.split(self.DELIM_FLOAT)] if pose_str else []
+        tran = [float(x) for x in tran_str.split(self.DELIM_FLOAT)] if tran_str else []
+        contact = [float(x) for x in contact_str.split(self.DELIM_FLOAT)] if contact_str else []
+        velocity = [float(x) for x in velocity_str.split(self.DELIM_FLOAT)] if velocity_str else []
+        return UnityIncomingFrame(pose=pose, tran=tran, contact=contact, velocity=velocity)
+
+    def split_packets(self, buffer: str) -> Tuple[List[str], str]:
+        """
+        从拼接缓冲中拆出完整packet（每个以 '$' 结尾），返回 (packets, remaining_buffer).
+        packets 中每个字符串都带 '$' 结尾，方便直接 parse_incoming().
+        """
+        packets: List[str] = []
+        while self.DELIM_END in buffer:
+            msg, buffer = buffer.split(self.DELIM_END, 1)
+            if msg:
+                packets.append(msg + self.DELIM_END)
+        return packets, buffer
+
+
