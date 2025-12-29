@@ -556,38 +556,38 @@ class PhysicsOptimizer:
             self.prev_right_foot_grf = None
 
         # 添加调试信息，打印 tau 和 GRF 的形状
-        if self.debug:
+        #if self.debug:
             # 计算并输出GRF在所有轴上的合力
-            if nc > 0:
-                grf_components = GRF.reshape(-1, 3)
-                grf_total = np.sum(grf_components, axis=0)
-                grf_magnitude = np.linalg.norm(grf_total)
-                print(f"GRF total force - X: {grf_total[0]:.6f}, Y: {grf_total[1]:.6f}, Z: {grf_total[2]:.6f}")
-                print(f"GRF total magnitude: {grf_magnitude:.6f}")
+            # if nc > 0:
+            #     grf_components = GRF.reshape(-1, 3)
+            #     grf_total = np.sum(grf_components, axis=0)
+            #     grf_magnitude = np.linalg.norm(grf_total)
+            #     print(f"GRF total force - X: {grf_total[0]:.6f}, Y: {grf_total[1]:.6f}, Z: {grf_total[2]:.6f}")
+            #     print(f"GRF total magnitude: {grf_magnitude:.6f}")
 
-                # 输出左右脚各自的GRF
-                left_foot_indices = [left_point_to_collision_idx[i] for i in range(4) if i in left_point_to_collision_idx]
-                right_foot_indices = [right_point_to_collision_idx[i] for i in range(4) if i in right_point_to_collision_idx]
+            #     # 输出左右脚各自的GRF
+            #     left_foot_indices = [left_point_to_collision_idx[i] for i in range(4) if i in left_point_to_collision_idx]
+            #     right_foot_indices = [right_point_to_collision_idx[i] for i in range(4) if i in right_point_to_collision_idx]
 
-                if left_foot_indices:
-                    left_grf = grf_components[left_foot_indices]
-                    left_total = np.sum(left_grf, axis=0)
-                    print(f"LFOOT GRF - X: {left_total[0]:.6f}, Y: {left_total[1]:.6f}, Z: {left_total[2]:.6f}")
+            #     if left_foot_indices:
+            #         left_grf = grf_components[left_foot_indices]
+            #         left_total = np.sum(left_grf, axis=0)
+            #         print(f"LFOOT GRF - X: {left_total[0]:.6f}, Y: {left_total[1]:.6f}, Z: {left_total[2]:.6f}")
                 
-                if right_foot_indices:
-                    right_grf = grf_components[right_foot_indices]
-                    right_total = np.sum(right_grf, axis=0)
-                    print(f"RFOOT GRF - X: {right_total[0]:.6f}, Y: {right_total[1]:.6f}, Z: {right_total[2]:.6f}")
+            #     if right_foot_indices:
+            #         right_grf = grf_components[right_foot_indices]
+            #         right_total = np.sum(right_grf, axis=0)
+            #         print(f"RFOOT GRF - X: {right_total[0]:.6f}, Y: {right_total[1]:.6f}, Z: {right_total[2]:.6f}")
 
-                # 打印每个接触点的力分量，并标注是哪个关节以及具体的点
-                for i, point_force in enumerate(grf_components):
-                    if i < len(collision_point_meta):
-                        joint_name, point_label = collision_point_meta[i]
-                        print(f"GRF component [{joint_name} - {point_label}]: "
-                              f"X: {point_force[0]:.6f}, Y: {point_force[1]:.6f}, Z: {point_force[2]:.6f}")
-                    else:
-                        print(f"GRF component [Unknown - point {i}]: "
-                              f"X: {point_force[0]:.6f}, Y: {point_force[1]:.6f}, Z: {point_force[2]:.6f}")
+            #     # 打印每个接触点的力分量，并标注是哪个关节以及具体的点
+            #     for i, point_force in enumerate(grf_components):
+            #         if i < len(collision_point_meta):
+            #             joint_name, point_label = collision_point_meta[i]
+            #             print(f"GRF component [{joint_name} - {point_label}]: "
+            #                   f"X: {point_force[0]:.6f}, Y: {point_force[1]:.6f}, Z: {point_force[2]:.6f}")
+            #         else:
+            #             print(f"GRF component [Unknown - point {i}]: "
+            #                   f"X: {point_force[0]:.6f}, Y: {point_force[1]:.6f}, Z: {point_force[2]:.6f}")
         # === Dynamic State Updates（论文 Sec.3.2.4）===
         # 论文用有限差分更新：qdot_{t+1} = qdot_t + q̈ Δt,  q_{t+1} = q_t + qdot_{t+1} Δt
         qdot = qdot + qddot * self.params['delta_t']
@@ -595,7 +595,7 @@ class PhysicsOptimizer:
         # [Repo实现差异] 这里最终把 self.q 直接回贴到 q_ref（而非积分得到的 q），属于工程折中：
         # - 好处：姿态更贴近网络输出，减少积分漂移；
         # - 代价：动力学积分状态与输出姿态不完全一致（但 qdot/λ/τ 仍来自QP）。
-        self.q = q_ref.copy()
+        self.q = q
         self.qdot = qdot
         self.last_x = x
 

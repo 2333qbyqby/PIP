@@ -3,6 +3,7 @@ from typing import Any, List, Optional, Tuple
 
 import pathlib
 import sys
+import argparse
 
 # 添加项目根目录到Python路径（兼容直接运行本文件）
 project_root = pathlib.Path(__file__).parent
@@ -175,46 +176,81 @@ class UnityConnector:
         print(f"当前优化帧数{self._physics.current_frame + 1}")
         return self._physics.optimize_frame(pose_data, jvel, contact, acc)
 
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Unity <-> Python socket connector (PIP).")
+    p.add_argument("--host", default="127.0.0.1", help="Bind/connect host. Use 0.0.0.0 to accept remote clients.")
+    p.add_argument("--port", type=int, default=8888, help="TCP port.")
+    p.add_argument(
+        "--mode",
+        choices=["server", "client"],
+        default="server",
+        help="server: Python listens and Unity connects; client: Python connects to Unity.",
+    )
+    p.add_argument("--max-recv-queue", type=int, default=100, help="Max receive queue size (drop oldest when full).")
+    p.add_argument("--fps", type=float, default=60.0, help="Main loop target FPS when idle.")
+    p.add_argument("--physics-debug", action="store_true", help="Enable physics optimizer debug mode.")
+    p.add_argument("--disable-physics", action="store_true", help="Run without physics optimizer (echo pose/tran).")
+    return p
+
+
+def _run_forever(args: argparse.Namespace) -> int:
+    import articulate as art
+    import numpy as np
+
+    connector = UnityConnector(host=args.host, port=args.port, max_receive_queue_size=args.max_recv_queue)
+
+    if not args.disable_physics:
+        connector.init_physics_optimizer(debug=bool(args.physics_debug))
+
+    ok = connector.connect_as_server() if args.mode == "server" else connector.connect_as_client()
+    if not ok:
+        return 2
+
+    dt = 1.0 / max(1.0, float(args.fps))
+    try:
+        while connector.running:
+            received = connector.receive_data(timeout=0.01)
+            if not received:
+                time.sleep(dt)
+                continue
+
+            pose, tran, contact, velocity = received
+
+            if args.disable_physics:
+                # Echo back: convert incoming 24x3x3 rotation matrices (216 floats) -> axis-angle (72 floats)
+                if len(pose) == 216:
+                    mats = np.array(pose, dtype=np.float32).reshape(24, 3, 3)
+                    pose_out = art.math.rotation_matrix_to_axis_angle(mats).reshape(-1).tolist()
+                else:
+                    pose_out = list(pose)
+                tran_out = list(tran) if tran is not None else [0.0, 0.0, 0.0]
+                grf_out = [0.0] * 24
+                tau_out = [0.0] * 6
+                connector.send_data(pose_out, tran_out, grf_out, tau_out)
+                continue
+
+            result = connector.optimize_frame_with_physics(pose, velocity, contact)
+
+            pose_out = art.math.rotation_matrix_to_axis_angle(result[0]).flatten().tolist()
+            tran_out = result[1].tolist()
+
+            if len(result) > 2 and isinstance(result[2], dict):
+                grf_out = result[2]
+            else:
+                grf_out = [0.0] * 24
+
+            tau_out = result[3] if len(result) > 3 else [0.0] * 6
+            connector.send_data(pose_out, tran_out, grf_out, tau_out)
+    except KeyboardInterrupt:
+        print("\n停止通信")
+    finally:
+        connector.close()
+    return 0
+
+
 # 使用示例
 if __name__ == "__main__":
-    import articulate as art
-
-    # 创建连接器实例
-    connector = UnityConnector()
-    connector.init_physics_optimizer(True)
-
-    # 作为服务器启动（等待Unity连接）
-    if connector.connect_as_server():
-        try:
-            while connector.running:
-                received = connector.receive_data(timeout=0.01)  # 非阻塞检查
-                if not received:
-                    time.sleep(1 / 60)
-                    continue
-
-                pose, tran, cj, velocity = received
-                print(f"接收到数据: pose长度={len(pose)}, tran长度={len(tran)}")
-
-                result = connector.optimize_frame_with_physics(pose, velocity, cj)
-
-                # 将result加入发送队列，并将结果发送给Unity
-                pose_data = art.math.rotation_matrix_to_axis_angle(result[0]).flatten().tolist()
-                tran_data = result[1].tolist()
-
-                # 处理新的GRF数据结构
-                if len(result) > 2 and isinstance(result[2], dict):
-                    grf_data = result[2]
-                else:
-                    grf_data = [0.0] * 24  # 8个点，每点3个值
-
-                # 处理可能缺失的虚拟力数据
-                tau_data = result[3] if len(result) > 3 else [0.0] * 6
-                connector.send_data(pose_data, tran_data, grf_data, tau_data)
-
-                time.sleep(1 / 60)  # 60 FPS
-        except KeyboardInterrupt:
-            print("\n停止通信")
-        finally:
-            connector.close()
-    else:
-        print("无法连接到Unity，已退出。")
+    parser = _build_arg_parser()
+    exit_code = _run_forever(parser.parse_args())
+    raise SystemExit(exit_code)
