@@ -250,75 +250,75 @@ class RBDLModel:
         # vel = rbdl.CalcPointVelocity(self.model, q, qdot, body.value, coordinates_in_body_frame, self.uk)
         vel = rbdl.CalcPointVelocity(self.model, q, qdot, body.value, coordinates_in_body_frame, self.uk)
         return vel
-#
-#     def calc_center_of_mass_position(self, q, qdot):
-#         r"""
-#         Calculate the total mass and the location of center of mass of the robot.
-#
-#         :param q: Robot configuration q in shape [dof].
-#         :param qdot: Robot velocity qdot in shape [dof].
-#         :return: Total mass (float) and the location of center of mass (ndarray in shape [3]).
-#         """
-#         com = np.zeros(3)
-#         mass = rbdl.CalcCenterOfMass(self.model, q, qdot, None, com, update_kinematics=self.uk)
-#         return mass, com
-#
-#     def calc_center_of_mass_position_velocity(self, q, qdot):
-#         r"""
-#         Calculate the total mass, the location, velocity, and angular momentum of center of mass of the robot.
-#
-#         :param q: Robot configuration q in shape [dof].
-#         :param qdot: Robot velocity qdot in shape [dof].
-#         :return: Total mass (float),
-#                  location of center of mass (com) in base frame (ndarray in shape [3]),
-#                  linear velocity of com in base frame (ndarray in shape [3]), and
-#                  angular momentum of the robot at com in base frame (ndarray in shape [3]).
-#         """
-#         com = np.zeros(3)
-#         com_velocity = np.zeros(3)
-#         angular_momentum = np.zeros(3)
-#         mass = rbdl.CalcCenterOfMass(self.model, q, qdot, None, com, com_velocity, None, angular_momentum,
-#                                      update_kinematics=self.uk)
-#         return mass, com, com_velocity, angular_momentum
-#
-#     def calc_center_of_mass_position_velocity_acceleration(self, q, qdot, qddot):
-#         r"""
-#         Calculate the total mass, the location, velocity, angular momentum, acceleration, and change of
-#         angular momentum of center of mass of the robot.
-#
-#         :param q: Robot configuration q in shape [dof].
-#         :param qdot: Robot velocity qdot in shape [dof].
-#         :param qddot: Robot acceleration qddot in shape [dof].
-#         :return: Total mass (float),
-#                  location of center of mass (com) in base frame (ndarray in shape [3]),
-#                  linear velocity of com in base frame (ndarray in shape [3]),
-#                  angular momentum of the robot at com in base frame (ndarray in shape [3]),
-#                  linear acceleration of com in base frame (ndarray in shape [3]), and
-#                  change of angular momentum of the robot at com in base frame (ndarray in shape [3]).
-#         """
-#         com = np.zeros(3)
-#         com_velocity = np.zeros(3)
-#         angular_momentum = np.zeros(3)
-#         com_acceleration = np.zeros(3)
-#         change_of_angular_momentum = np.zeros(3)
-#         mass = rbdl.CalcCenterOfMass(self.model, q, qdot, qddot, com, com_velocity, com_acceleration,
-#                                      angular_momentum, change_of_angular_momentum, update_kinematics=self.uk)
-#         return mass, com, com_velocity, angular_momentum, com_acceleration, change_of_angular_momentum
-#
-#     def calc_zero_moment_point(self, q, qdot, qddot, plane_normal=np.array([0, 1., 0])):
-#         r"""
-#         Computes the Zero-Moment-Point (ZMP) on a given contact surface that passes the origin (determined by normal).
-#
-#         :param q: Robot configuration q in shape [dof].
-#         :param qdot: Robot velocity qdot in shape [dof].
-#         :param qddot: Robot acceleration qddot in shape [dof].
-#         :param plane_normal: The ground normal in shape [3].
-#         :return: The zero moment point in shape [3].
-#         """
-#         zmp = np.zeros(3)
-#         rbdl.CalcZeroMomentPoint(self.model, q, qdot, qddot, zmp, plane_normal, np.zeros(3), update_kinematics=self.uk)
-#         return zmp
-#
+
+    def calc_center_of_mass_position(self, q, qdot):
+        r"""
+        Calculate the total mass and the location of center of mass of the robot.
+
+        :param q: Robot configuration q in shape [dof].
+        :param qdot: Robot velocity qdot in shape [dof].
+        :return: Total mass (float) and the location of center of mass (ndarray in shape [3]).
+        """
+        com = np.zeros(3)
+        mass = rbdl.CalcCenterOfMass(self.model, q, qdot, None, com, update_kinematics=self.uk)
+        return mass, com
+
+    def calc_center_of_mass_position_velocity(self, q, qdot):
+        r"""
+        Calculate the total mass, the location, velocity, and angular momentum of center of mass of the robot.
+
+        :param q: Robot configuration q in shape [dof].
+        :param qdot: Robot velocity qdot in shape [dof].
+        :return: Total mass (float),
+                 location of center of mass (com) in base frame (ndarray in shape [3]),
+                 linear velocity of com in base frame (ndarray in shape [3]), and
+                 angular momentum of the robot at com in base frame (ndarray in shape [3]).
+        """
+        com = np.zeros(3)
+        com_velocity = np.zeros(3)
+        angular_momentum = np.zeros(3)
+        mass = rbdl.CalcCenterOfMass(self.model, q, qdot, None, com, com_velocity, None, angular_momentum,
+                                     update_kinematics=self.uk)
+        return mass, com, com_velocity, angular_momentum
+
+    def calc_center_of_mass_position_velocity_acceleration(self, q, qdot, qddot):
+        r"""
+        Calculate the total mass, the location, velocity, angular momentum, acceleration, and change of
+        angular momentum of center of mass of the robot.
+
+        :param q: Robot configuration q in shape [dof].
+        :param qdot: Robot velocity qdot in shape [dof].
+        :param qddot: Robot acceleration qddot in shape [dof].
+        :return: Total mass (float),
+                 location of center of mass (com) in base frame (ndarray in shape [3]),
+                 linear velocity of com in base frame (ndarray in shape [3]),
+                 angular momentum of the robot at com in base frame (ndarray in shape [3]),
+                 linear acceleration of com in base frame (ndarray in shape [3]), and
+                 change of angular momentum of the robot at com in base frame (ndarray in shape [3]).
+        """
+        com = np.zeros(3)
+        com_velocity = np.zeros(3)
+        angular_momentum = np.zeros(3)
+        com_acceleration = np.zeros(3)
+        change_of_angular_momentum = np.zeros(3)
+        mass = rbdl.CalcCenterOfMass(self.model, q, qdot, qddot, com, com_velocity, com_acceleration,
+                                     angular_momentum, change_of_angular_momentum, update_kinematics=self.uk)
+        return mass, com, com_velocity, angular_momentum, com_acceleration, change_of_angular_momentum
+
+    def calc_zero_moment_point(self, q, qdot, qddot, plane_normal=np.array([0, 1., 0])):
+        r"""
+        Computes the Zero-Moment-Point (ZMP) on a given contact surface that passes the origin (determined by normal).
+
+        :param q: Robot configuration q in shape [dof].
+        :param qdot: Robot velocity qdot in shape [dof].
+        :param qddot: Robot acceleration qddot in shape [dof].
+        :param plane_normal: The ground normal in shape [3].
+        :return: The zero moment point in shape [3].
+        """
+        zmp = np.zeros(3)
+        rbdl.CalcZeroMomentPoint(self.model, q, qdot, qddot, zmp, plane_normal, np.zeros(3), update_kinematics=self.uk)
+        return zmp
+
     def update_kinematics(self, q, qdot, qddot):
         r"""
         Update the kinematic states.

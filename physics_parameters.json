@@ -69,15 +69,20 @@
         "min": 0,
         "max": 50,
         "value": 0.1
+    },{
+        "name": "com_load_balance_coeff",
+        "min": 0,
+        "max": 50,
+        "value": 0.4
+    }, {
+        "name": "com_load_balance_stable_min",
+        "min": 0,
+        "max": 1,
+        "value": 0.5
     }, {
         "name": "max_total_grf_y_multiple",
         "min": 0,
         "max": 10,
         "value": 3.0
-    }, {
-        "name": "min_total_grf_y_multiple",
-        "min": 0,
-        "max": 10,
-        "value": 1.0
     }
 ]

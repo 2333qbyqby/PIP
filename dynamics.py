@@ -386,6 +386,51 @@ class PhysicsOptimizer:
                     right_indices = sorted(right_point_to_collision_idx.values())
                     _add_foot_total_force_smooth_term(left_indices, self.prev_left_foot_grf, stable=float(foot_stable[0]))
                     _add_foot_total_force_smooth_term(right_indices, self.prev_right_foot_grf, stable=float(foot_stable[1]))
+        # [Repo扩展/非论文] 基于“重心投影”的左右脚法向力(Fy)分配先验（soft penalty）
+        # 你提到的诉求：双脚8点都触地时，希望左右脚承重大小能随重心偏移而变化。
+        # 现有实现只靠动力学平衡 + 正则，双支撑时 λ 分配往往冗余，容易趋向均分/数值偏置。
+        #
+        # 这里采用一个保持QP线性的“比例先验”：
+        #   设 Fy_L = Σ_{i∈L} Fy_i, Fy_R = Σ_{i∈R} Fy_i
+        #   用 CoM 在左右脚中心连线 (xz 平面) 上的投影得到 α∈[0,1]（α=0靠左脚，α=1靠右脚）
+        #   期望比例 Fy_R / (Fy_L + Fy_R) ≈ α
+        #   等价线性形式： (1-α) Fy_R - α Fy_L ≈ 0
+        if True:
+            if nc > 0:
+                coeff = float(self.params.get('com_load_balance_coeff', 0.0))
+                if coeff > 0.0:
+                    stable_min = float(self.params.get('com_load_balance_stable_min', 0.5))
+                    # 需要左右脚都在接触集合里
+                    left_indices = sorted(left_point_to_collision_idx.values())
+                    right_indices = sorted(right_point_to_collision_idx.values())
+                    if len(left_indices) > 0 and len(right_indices) > 0 and float(foot_stable[0]) >= stable_min and float(foot_stable[1]) >= stable_min:
+                        # 估计左右脚中心（用当前参与QP的接触点平均；8点全接触时就是各4点均值）
+                        pL = np.mean(np.asarray([collision_points[i] for i in left_indices], dtype=np.float64), axis=0)
+                        pR = np.mean(np.asarray([collision_points[i] for i in right_indices], dtype=np.float64), axis=0)
+
+                        # 估计CoM：直接使用 RBDLModel 的 CalcCenterOfMass 封装
+                        # 注意：不同 pyrbdl 版本可能没有该接口/签名不同，如遇异常则退化为 root 位置。
+                        try:
+                            _, com = self.model.calc_center_of_mass_position(q, qdot)
+                        except Exception:
+                            com = np.asarray(q[:3], dtype=np.float64).reshape(3)
+
+                        # 在xz平面做投影比例
+                        d = (pR[[0, 2]] - pL[[0, 2]]).astype(np.float64)
+                        denom = float(np.dot(d, d))
+                        if denom > 1e-10:
+                            t = float(np.dot((com[[0, 2]] - pL[[0, 2]]).astype(np.float64), d) / denom)
+                            alpha = float(np.clip(t, 0.0, 1.0))
+
+                            row = np.zeros((nc * 3,), dtype=np.float64)
+                            # 取各点的 Fy 分量：lambda 排列为 [Fx0,Fy0,Fz0,...]，Fy 在 1::3
+                            for i in right_indices:
+                                row[i * 3 + 1] += (1.0 - alpha)
+                            for i in left_indices:
+                                row[i * 3 + 1] += (-alpha)
+
+                            As2.append(row.reshape(1, -1) * coeff)
+                            bs2.append(np.zeros((1,), dtype=np.float64))
 
         # E_res 与 E_τ：对 τ 的L2正则（论文 Eq.(9)：Eres = ||τ[:6]||^2, Eτ = ||τ[6:]||^2）
         # 说明：论文权重默认 k_res=0.1, k_τ=0.01；这里对应 physics_parameters.json 中 coeff_virtual/coeff_tau。
@@ -556,7 +601,7 @@ class PhysicsOptimizer:
             self.prev_right_foot_grf = None
 
         # 添加调试信息，打印 tau 和 GRF 的形状
-        #if self.debug:
+        #                                                                                                            if self.debug:
             # 计算并输出GRF在所有轴上的合力
             # if nc > 0:
             #     grf_components = GRF.reshape(-1, 3)
