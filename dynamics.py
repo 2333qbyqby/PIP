@@ -518,13 +518,18 @@ class PhysicsOptimizer:
         # 约束“所有接触点地面反力”的法向（Y轴）合力上限：
         #   Σ_i Fy_i <= k * m * g
         # - k 通过 physics_parameters.json 的 max_total_grf_y_multiple 配置（默认建议 3.0）
-        # - m 为 self.body_mass_kg（优先读取 params['body_mass_kg']，否则从URDF惯性质量汇总）
+        # - m 为 (人体质量 + 外载荷质量)：
+        #   * 人体质量 self.body_mass_kg（优先读取 params['body_mass_kg']，否则从URDF惯性质量汇总）
+        #   * 外载荷质量：dumbbell_mass_left_kg / dumbbell_mass_right_kg（点质量模型）
         # - 这是线性不等式，可直接加到 λ 的 Gx<=h 里（G2 * lambda <= h2）
         if True:
             if nc > 0:
                 k = float(self.params.get('max_total_grf_y_multiple', 0.0))
                 if k > 0.0 and float(self.body_mass_kg) > 0.0 and float(self.gravity) > 0.0:
-                    fy_max = k * float(self.body_mass_kg) * float(self.gravity)
+                    mL = float(self.params.get('dumbbell_mass_left_kg', 0.0))
+                    mR = float(self.params.get('dumbbell_mass_right_kg', 0.0))
+                    total_mass = float(self.body_mass_kg) + max(mL, 0.0) + max(mR, 0.0)
+                    fy_max = k * total_mass * float(self.gravity)
                     # λ 排列为 [Fx0,Fy0,Fz0, Fx1,Fy1,Fz1, ...]，因此取每个点的 Fy 分量求和
                     row = np.zeros((nc * 3,), dtype=np.float64)
                     row[1::3] = 1.0
@@ -536,8 +541,42 @@ class PhysicsOptimizer:
         if True:
             M = self.model.calc_M(q)
             h = self.model.calc_h(q, qdot)
-            A_ = np.hstack((-M, Js.T, np.eye(self.model.qdot_size)))
-            b_ = h
+
+            # === [Repo扩展/哑铃外载荷] 动态点质量外力并入动力学（仍保持线性QP）===
+            # 设哑铃为“绑在手上的点质量” m，手点世界加速度：
+            #   a_hand = J_hand(q) q̈ + Jdot_hand(q,qdot) qdot
+            # 哑铃对手的反作用力（世界坐标，y-up）：
+            #   f = m (g_vec - a_hand),  其中 g_vec = [0, -g, 0]^T
+            # 外力对应的广义力：
+            #   Q = J_hand^T f = J^T m g_vec - m J^T J q̈ - m J^T (Jdot qdot)
+            # 代入 M q̈ + h = Jc^T λ + τ + Q 得：
+            #   (M + m J^T J) q̈ + h + m J^T (Jdot qdot) - J^T m g_vec = Jc^T λ + τ
+            # 写成当前实现的线性等式形式：
+            #   [-(M + m J^T J), Jc^T, I] [q̈, λ, τ]^T = h + m J^T (Jdot qdot) - J^T m g_vec
+            M_eff = M.astype(np.float64, copy=True)
+            b_eff = h.astype(np.float64, copy=True)
+
+            g_vec = np.array([0.0, -float(self.gravity), 0.0], dtype=np.float64)
+            mL = float(self.params.get('dumbbell_mass_left_kg', 0.0))
+            mR = float(self.params.get('dumbbell_mass_right_kg', 0.0))
+
+            def _add_hand_point_mass(body_id, m_kg: float):
+                nonlocal M_eff, b_eff
+                if m_kg <= 0.0:
+                    return
+                J = self.model.calc_point_Jacobian(q, body_id, np.zeros(3)).astype(np.float64)
+                # 令 q̈=0 时的点加速度，主要是 Jdot*qdot（+ 其它科氏项；RBDL会给出一致的表达）
+                a0 = self.model.calc_point_acceleration(
+                    q, qdot, np.zeros(self.model.qdot_size, dtype=np.float64), body_id, np.zeros(3)
+                ).astype(np.float64)
+                M_eff = M_eff + float(m_kg) * (J.T @ J)
+                b_eff = b_eff + float(m_kg) * (J.T @ a0) - (J.T @ (float(m_kg) * g_vec))
+
+            _add_hand_point_mass(Body.LHAND, mL)
+            _add_hand_point_mass(Body.RHAND, mR)
+
+            A_ = np.hstack((-M_eff, Js.T, np.eye(self.model.qdot_size)))
+            b_ = b_eff
 
         As1, bs1, As2, bs2, As3, bs3 = np.vstack(As1), np.concatenate(bs1), np.vstack(As2), np.concatenate(bs2), np.vstack(As3), np.concatenate(bs3)
         Gs1, hs1, Gs2, hs2, Gs3, hs3 = np.vstack(Gs1), np.concatenate(hs1), np.vstack(Gs2), np.concatenate(hs2), np.vstack(Gs3), np.concatenate(hs3)

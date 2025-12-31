@@ -84,5 +84,15 @@
         "min": 0,
         "max": 10,
         "value": 3.0
+    }, {
+        "name": "dumbbell_mass_left_kg",
+        "min": 0,
+        "max": 50,
+        "value": 10
+    }, {
+        "name": "dumbbell_mass_right_kg",
+        "min": 0,
+        "max": 50,
+        "value": 0
     }
 ]
