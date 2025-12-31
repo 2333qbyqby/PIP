@@ -99,7 +99,9 @@ class PIP(torch.nn.Module):
         joint_velocity = joint_velocity.view(-1, 24, 3).bmm(glb_rot[:, -1].transpose(1, 2)) * vel_scale
         pose_opt, tran_opt = [], []
         for p, v, c, a in zip(pose, joint_velocity, contact, glb_acc):
-            p, t = self.dynamics_optimizer.optimize_frame(p, v, c, a)
+            # dynamics_optimizer.optimize_frame() 返回 (pose_opt, tran_opt, labeled_grf, tau)
+            # 这里评测/推理仅使用姿态与平移，其余信息忽略
+            p, t, _, _ = self.dynamics_optimizer.optimize_frame(p, v, c, a)
             pose_opt.append(p)
             tran_opt.append(t)
         pose_opt, tran_opt = torch.stack(pose_opt), torch.stack(tran_opt)

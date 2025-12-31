@@ -157,7 +157,12 @@ class PhysicsOptimizer:
 
         if q is None:
             self.q = q_ref
-            return pose, torch.zeros(3)
+            # 保持返回结构稳定：(pose_opt, tran_opt, labeled_grf, tau)
+            # - pose_opt: 与输入 pose 类型一致（torch/numpy）
+            # - tran_opt: torch.Tensor shape(3,)
+            # - labeled_grf: dict，首帧无接触信息时为空
+            # - tau: 广义力 τ，shape(self.model.qdot_size,)；首帧返回全0
+            return pose, torch.zeros(3), {}, np.zeros(self.model.qdot_size, dtype=np.float64)
         print('optimize frame')
         # === Contact Point Determination（论文 Sec.3.2.3）===
         # 论文做法：先判定哪些关节与地面接触，再在每个接触关节处画 L×L 方形取4个顶点作为接触点（facet contact更稳定）。
@@ -693,7 +698,32 @@ class PhysicsOptimizer:
                     })
             labeled_grf['other_contacts'] = other_grf_data
 
-        # 添加虚拟力的六项到返回值
-        virtual_force = tau[:6]  # 提取虚拟力的六项
+        # 返回广义力 τ（长度 = self.model.qdot_size = 75）
+        # - τ[:6]：root residual force/torque（常被称为“虚拟力/残余力”）
+        # - τ[6:]：各关节力矩（23个关节 * 3维），按 RBDL 顺序排列（每段3维对应该关节的XYZ分量）：
+        #   τ[6:9]    = LHIP
+        #   τ[9:12]   = LKNEE
+        #   τ[12:15]  = LANKLE
+        #   τ[15:18]  = LFOOT
+        #   τ[18:21]  = RHIP
+        #   τ[21:24]  = RKNEE
+        #   τ[24:27]  = RANKLE
+        #   τ[27:30]  = RFOOT
+        #   τ[30:33]  = SPINE1
+        #   τ[33:36]  = SPINE2
+        #   τ[36:39]  = SPINE3
+        #   τ[39:42]  = LCLAVICLE
+        #   τ[42:45]  = LSHOULDER
+        #   τ[45:48]  = LELBOW
+        #   τ[48:51]  = LWRIST
+        #   τ[51:54]  = LHAND
+        #   τ[54:57]  = RCLAVICLE
+        #   τ[57:60]  = RSHOULDER
+        #   τ[60:63]  = RELBOW
+        #   τ[63:66]  = RWRIST
+        #   τ[66:69]  = RHAND
+        #   τ[69:72]  = NECK
+        #   τ[72:75]  = HEAD
+        generalized_tau = tau
 
-        return pose_opt, tran_opt, labeled_grf, virtual_force
+        return pose_opt, tran_opt, labeled_grf, generalized_tau
