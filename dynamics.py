@@ -337,60 +337,6 @@ class PhysicsOptimizer:
                 As2.append(A * self.params['coeff_lambda'])
                 bs2.append(np.zeros(nc * 3))
 
-        # [Repo扩展/非论文] 左/右脚“合力跨帧平滑”（soft penalty，而非 hard 约束）
-        # 目标项：E_F = ||F - F_prev||^2，其中 F = Σ_{i in foot} f_i （对左右脚分别计算）
-        # 实现为最小二乘：|| (c * R) * λ - (c * F_prev) ||^2
-        # - R 是 3 x (3*nc) 的线性求和矩阵，每行对应 x/y/z 分量的求和
-        # - c 是可调系数（越大越“粘”上一帧，越平滑但可能影响快速换步）
-        # if True:
-        #     if nc > 0:
-        #         # 统一门控逻辑：
-        #         # - prev_F 太小：认为上一帧无有效接触，不加“跨帧合力”项/约束，避免抬脚时被硬拉
-        #         # - stable 低于阈值：认为该脚本帧不稳定/不接触，不加项（阈值为0时等价于不启用此门控）
-        #         eps = float(self.params.get('contact_total_force_gate_eps', 1e-3))
-        #         def _build_total_force_sum_matrix(foot_indices):
-        #             """
-        #             构造 F = R * λ 的线性求和矩阵 R（3 x (3*nc)）。
-        #             其中 foot_indices 是 collision_points 中属于某只脚的点索引集合。
-        #             """
-        #             if foot_indices is None:
-        #                 return None
-        #             idxs = sorted({int(i) for i in foot_indices if 0 <= int(i) < nc})
-        #             if len(idxs) == 0:
-        #                 return None
-        #             R = np.zeros((3, nc * 3), dtype=np.float64)
-        #             for i in idxs:
-        #                 R[0, i * 3 + 0] = 1.0
-        #                 R[1, i * 3 + 1] = 1.0
-        #                 R[2, i * 3 + 2] = 1.0
-        #             return R
-
-        #         def _should_apply_total_force_term(prev_F, foot_indices, stable: float) -> bool:
-        #             if prev_F is None:
-        #                 return False
-        #             if foot_indices is None or len(foot_indices) == 0:
-        #                 return False
-        #             if np.linalg.norm(np.asarray(prev_F, dtype=np.float64).reshape(3)) <= eps:
-        #                 return False
-        #             return True
-
-        #         # soft penalty（最小二乘项）
-        #         total_force_coeff = float(self.params.get('contact_total_force_smooth_coeff', 0.0))
-        #         if total_force_coeff > 0.0:
-        #             def _add_foot_total_force_smooth_term(foot_indices, prev_F, stable: float):
-        #                 if not _should_apply_total_force_term(prev_F, foot_indices, stable=stable):
-        #                     return
-        #                 R = _build_total_force_sum_matrix(foot_indices)
-        #                 if R is None:
-        #                     return
-        #                 prev_F = np.asarray(prev_F, dtype=np.float64).reshape(3)
-        #                 As2.append(R * total_force_coeff)
-        #                 bs2.append(prev_F * total_force_coeff)
-
-        #             left_indices = sorted(left_point_to_collision_idx.values())
-        #             right_indices = sorted(right_point_to_collision_idx.values())
-        #             _add_foot_total_force_smooth_term(left_indices, self.prev_left_foot_grf, stable=float(foot_stable[0]))
-        #             _add_foot_total_force_smooth_term(right_indices, self.prev_right_foot_grf, stable=float(foot_stable[1]))
         # [Repo扩展/非论文] 基于“重心投影”的左右脚法向力(Fy)分配先验（soft penalty）
         # 你提到的诉求：双脚8点都触地时，希望左右脚承重大小能随重心偏移而变化。
         # 现有实现只靠动力学平衡 + 正则，双支撑时 λ 分配往往冗余，容易趋向均分/数值偏置。
@@ -557,6 +503,7 @@ class PhysicsOptimizer:
             b_eff = h.astype(np.float64, copy=True)
 
             g_vec = np.array([0.0, -float(self.gravity), 0.0], dtype=np.float64)
+            
             mL = float(self.params.get('dumbbell_mass_left_kg', 0.0))
             mR = float(self.params.get('dumbbell_mass_right_kg', 0.0))
 
@@ -564,10 +511,18 @@ class PhysicsOptimizer:
                 nonlocal M_eff, b_eff
                 if m_kg <= 0.0:
                     return
-                J = self.model.calc_point_Jacobian(q, body_id, np.zeros(3)).astype(np.float64)
+                
+                # 硬编码偏移：点在“手link局部坐标系”里，先用 10cm 量级试
+                if body_id == Body.LHAND:
+                    offset_b = np.array([0.0, 0.0, 0.00], dtype=np.float64)
+                elif body_id == Body.RHAND:
+                    offset_b = np.array([0.0, 0.0, 0.00], dtype=np.float64)
+                else:
+                    offset_b = np.zeros(3, dtype=np.float64)
+                J = self.model.calc_point_Jacobian(q, body_id, offset_b).astype(np.float64)
                 # 令 q̈=0 时的点加速度，主要是 Jdot*qdot（+ 其它科氏项；RBDL会给出一致的表达）
                 a0 = self.model.calc_point_acceleration(
-                    q, qdot, np.zeros(self.model.qdot_size, dtype=np.float64), body_id, np.zeros(3)
+                    q, qdot, np.zeros(self.model.qdot_size, dtype=np.float64), body_id, offset_b
                 ).astype(np.float64)
                 M_eff = M_eff + float(m_kg) * (J.T @ J)
                 b_eff = b_eff + float(m_kg) * (J.T @ a0) - (J.T @ (float(m_kg) * g_vec))
