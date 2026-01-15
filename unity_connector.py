@@ -157,17 +157,16 @@ class UnityConnector:
         """
         self._physics.init(debug=debug)
 
-    def optimize_frame_with_physics(self, pose_data: List[float], jvel: List[float], contact: List[float], acc: List[float] = None):
+    def optimize_frame_with_physics(self, pose_data: List[float], jvel: List[float], contact: Any, acc: List[float] = None):
         """
         使用物理优化器优化单帧数据
         
         Args:
             pose: 姿态数据
             jvel: 关节速度数据
-            contact: 接触信息数据
-                - 新结构：10个float
-                  [0]=左脚接触程度, [1]=右脚接触程度
-                  [2:6]=左脚4个点(0/1), [6:10]=右脚4个点(0/1)
+            contact: 接触信息数据（兼容多种结构）
+                - 旧结构：2个float（左右脚接触程度）
+                - 新结构：dict/json（全关节：每关节1个强度c + 4点mask）
             acc: 加速度数据
             
         Returns:

@@ -54,12 +54,7 @@
         "min": 0,
         "max": 1,
         "value": 0.01
-    }, {
-        "name": "virtual_force_norm_max",
-        "min": 0,
-        "max": 5000,
-        "value": 200
-    }, {
+    },  {
         "name": "contact_total_force_gate_eps",
         "min": 0,
         "max": 10,
@@ -88,11 +83,16 @@
         "name": "dumbbell_mass_left_kg",
         "min": 0,
         "max": 50,
-        "value": 10
+        "value": 0
     }, {
         "name": "dumbbell_mass_right_kg",
         "min": 0,
         "max": 50,
         "value": 0
+    }, {
+        "name": "debug_print_contacts",
+        "min": 0,
+        "max": 1,
+        "value": 1
     }
 ]

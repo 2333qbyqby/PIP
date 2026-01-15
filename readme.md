@@ -88,6 +88,85 @@ The authors are too busy to clean up/rewrite the codes. Here are some useful tip
 
 - The hyperparameters for the physics optimization are all in `physics_parameters.json`.  If you set `debug=True`, you can adjust these parameters interactively in the pybullet window.
 
+## Contact input format (Route-B surfaces: arbitrary support planes)
+
+`dynamics.py` supports a dict-based `contact` input so you can **manually specify which joints/points are in contact**, the **contact degree** (used to tighten/relax the no-slip constraint), and (Route-B) an **arbitrary contact surface plane** for each joint.
+
+Each joint can provide:
+- `c`: contact degree in \([0,1]\) (larger => stricter no-slip)
+- `p`: 4-corner mask \([p0,p1,p2,p3]\) (1=active, 0=inactive)
+- `n`: surface normal (world) for the contact plane
+- `p0`: a point on the contact plane (world)
+
+If `n/p0` are omitted, the solver falls back to the default ground plane `y = floor_y` (i.e., `n=[0,1,0]`, `p0=[0,floor_y,0]`).
+
+Example (chair seat + back support):
+
+```json
+{
+  "joints": {
+    "LFOOT":  { "c": 0.9, "p": [1,1,1,1], "n": [0,1,0], "p0": [0,-0.87,0] },
+    "RFOOT":  { "c": 0.9, "p": [1,1,1,1], "n": [0,1,0], "p0": [0,-0.87,0] },
+
+    // chair seat plane (horizontal)
+    "LHIP":   { "c": 0.9, "p": [1,1,1,1], "n": [0,1,0], "p0": [0,-0.45,0] },
+    "RHIP":   { "c": 0.9, "p": [1,1,1,1], "n": [0,1,0], "p0": [0,-0.45,0] },
+
+    // chair back plane (vertical, normal points forward)
+    "SPINE2": { "c": 0.8, "p": [1,1,1,1], "n": [0,0,1], "p0": [0,0,0.25] }
+  }
+}
+```
+
+## Unity connector: GRF payload format
+
+This repo includes a simple socket connector (`unity_connector.py`). The outgoing packet format is:
+
+`pose#tran#grf#tau$`
+
+Where `grf` is now sent as a **JSON string** (when physics is enabled), containing **all active contact points** with their joint names:
+
+```json
+{
+  "contacts": [
+    {"joint":"LFOOT","point":"front-left","force":[0.0,123.4,0.0]},
+    {"joint":"LKNEE","point":"point-0","force":[1.2,0.0,3.4]}
+  ],
+  "left_foot": [
+    {"point":"front-left","force":[0.0,0.0,0.0]},
+    {"point":"front-right","force":[0.0,0.0,0.0]},
+    {"point":"back-left","force":[0.0,0.0,0.0]},
+    {"point":"back-right","force":[0.0,0.0,0.0]}
+  ],
+  "right_foot": [
+    {"point":"front-left","force":[0.0,0.0,0.0]},
+    {"point":"front-right","force":[0.0,0.0,0.0]},
+    {"point":"back-left","force":[0.0,0.0,0.0]},
+    {"point":"back-right","force":[0.0,0.0,0.0]}
+  ]
+}
+```
+
+Notes:
+- `contacts` is a **fixed-size full list**: for every joint in `test_contact_joints`, we always output 4 corner points (`front-left/front-right/back-left/back-right`). If a point is not active in the QP contact set in this frame, its `force` is `[0,0,0]`.
+- `left_foot` / `right_foot` always contain 4 entries each (fixed order), for easy visualization/debug.
+
+Unity (C#) parsing sketch:
+
+```csharp
+// packet: pose#tran#grf#tau$
+var packet = raw.TrimEnd('$');
+var parts = packet.Split('#');
+var grfJson = parts[2];
+
+// Recommended: Newtonsoft.Json
+// var msg = JsonConvert.DeserializeObject<GrfMsg>(grfJson);
+
+[Serializable] public class GrfMsg { public ContactPoint[] contacts; public FootPoint[] left_foot; public FootPoint[] right_foot; }
+[Serializable] public class ContactPoint { public string joint; public string point; public float[] force; }
+[Serializable] public class FootPoint { public string point; public float[] force; }
+```
+
 ## Citation
 
 If you find the project helpful, please consider citing us:

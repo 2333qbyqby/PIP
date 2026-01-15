@@ -3,12 +3,13 @@ import numpy as np
 import pybullet as p
 import articulate as art
 import xml.etree.ElementTree as ET
-from typing import Optional
+from typing import Any, Dict, Optional, Tuple, List
 from articulate.utils.bullet import *
 from articulate.utils.rbdl import *
 from utils import *
 from qpsolvers import solve_qp
 from config import paths
+from q_recorder import record_q_frame
 
 
 class PhysicsOptimizer:
@@ -36,12 +37,175 @@ class PhysicsOptimizer:
         - 无滑动/防穿透（no sliding）:        ṙ_j(q̈) ∈ C（实现中用离散时间的速度不等式近似）
 
     注意：本仓库在论文基础上还加入了若干“工程化”扩展（见代码中 [Repo扩展/非论文] 标注），
-    例如接触力跨帧平滑约束、Unity侧显式脚底接触点输入等，用于提升实时稳定性/可控性。
+    例如 Unity 侧显式接触点输入、结构化GRF回传等，用于提升实时稳定性/可控性。
     """
     test_contact_joints = ['LHIP', 'RHIP', 'SPINE1', 'LKNEE', 'RKNEE', 'SPINE2',
                            'SPINE3', 'LSHOULDER', 'RSHOULDER', 'HEAD',
                            'LELBOW', 'RELBOW', 'LHAND', 'RHAND', 'LFOOT', 'RFOOT'
                            ]  # 'LANKLE', 'RANKLE', 'NECK', 'LWRIST', 'RWRIST', 'LCLAVICLE', 'RCLAVICLE'
+
+    @staticmethod
+    def _safe_unit_vector(v: Any, default: np.ndarray) -> np.ndarray:
+        """
+        尝试把输入 v 转成单位向量；失败则返回 default（也会被归一化）。
+        """
+        d = np.asarray(default, dtype=np.float64).reshape(3)
+        dn = float(np.linalg.norm(d))
+        if dn > 1e-12:
+            d = d / dn
+        try:
+            x = np.asarray(v, dtype=np.float64).reshape(3)
+            n = float(np.linalg.norm(x))
+            if n > 1e-12:
+                return x / n
+        except Exception:
+            pass
+        return d
+
+    @staticmethod
+    def _make_tangent_basis(n: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        给定单位法向 n，构造一组正交切向基 (t1, t2)。
+        """
+        n = np.asarray(n, dtype=np.float64).reshape(3)
+        # 选择一个不与 n 共线的参考向量
+        up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        if abs(float(np.dot(n, up))) > 0.9:
+            up = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        t1 = np.cross(up, n)
+        t1n = float(np.linalg.norm(t1))
+        if t1n < 1e-12:
+            # 极端退化情况再换一次参考向量
+            up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+            t1 = np.cross(up, n)
+            t1n = float(np.linalg.norm(t1))
+        if t1n > 1e-12:
+            t1 = t1 / t1n
+        else:
+            # 最后兜底：随便给一个
+            t1 = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        t2 = np.cross(n, t1)
+        t2n = float(np.linalg.norm(t2))
+        if t2n > 1e-12:
+            t2 = t2 / t2n
+        return t1, t2
+
+    @staticmethod
+    def _parse_contact_dict(contact: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        """
+        解析 contact dict：全关节 (c + p4) + 可选 surface plane (n + p0)。
+
+        支持两类结构：
+        - 方案A（推荐）：{ "order": [...], "c":[...], "p":[[...],[...],...], "n":[[...],...], "p0":[[...],...] }
+        - 方案B：{ "joints": { "LHIP": {"c":0.2,"p":[0,0,0,0],"n":[0,1,0],"p0":[0,-0.87,0]}, ... } }
+
+        返回：joint_name -> dict:
+          - c: float (接触程度，用于无滑动阈值)
+          - p: np.ndarray shape(4,) or None (四角点mask，决定哪些点加入QP)
+          - n: np.ndarray shape(3,) or None (接触面法向，世界坐标；若不提供则走默认地面)
+          - p0: np.ndarray shape(3,) or None (接触面上一点，世界坐标；若不提供则走默认地面)
+        """
+        contact_by_joint: Dict[str, Dict[str, Any]] = {}
+
+        # 方案A：order + 数组
+        if isinstance(contact.get("order"), list) and isinstance(contact.get("c"), list):
+            order = contact.get("order") or []
+            c_list = contact.get("c") or []
+            p_list = contact.get("p", None)
+            n_list = contact.get("n", None)
+            p0_list = contact.get("p0", None)
+            n = min(len(order), len(c_list))
+            for i in range(n):
+                jn = str(order[i])
+                try:
+                    c_val = float(c_list[i])
+                except Exception:
+                    c_val = 0.0
+
+                p4 = None
+                if isinstance(p_list, list) and i < len(p_list):
+                    try:
+                        p4 = np.asarray(p_list[i], dtype=np.float32).reshape(4)
+                    except Exception:
+                        p4 = None
+
+                n_vec = None
+                if isinstance(n_list, list) and i < len(n_list):
+                    try:
+                        n_vec = np.asarray(n_list[i], dtype=np.float64).reshape(3)
+                    except Exception:
+                        n_vec = None
+                p0_vec = None
+                if isinstance(p0_list, list) and i < len(p0_list):
+                    try:
+                        p0_vec = np.asarray(p0_list[i], dtype=np.float64).reshape(3)
+                    except Exception:
+                        p0_vec = None
+
+                contact_by_joint[jn] = {"c": c_val, "p": p4, "n": n_vec, "p0": p0_vec}
+            return contact_by_joint
+
+        # 方案B：joints dict
+        joints = contact.get("joints")
+        if isinstance(joints, dict):
+            for jn, payload in joints.items():
+                c_val = 0.0
+                p4 = None
+                n_vec = None
+                p0_vec = None
+                if isinstance(payload, dict):
+                    try:
+                        c_val = float(payload.get("c", 0.0))
+                    except Exception:
+                        c_val = 0.0
+                    if "p" in payload:
+                        try:
+                            p4 = np.asarray(payload.get("p"), dtype=np.float32).reshape(4)
+                        except Exception:
+                            p4 = None
+                    if "n" in payload:
+                        try:
+                            n_vec = np.asarray(payload.get("n"), dtype=np.float64).reshape(3)
+                        except Exception:
+                            n_vec = None
+                    if "p0" in payload:
+                        try:
+                            p0_vec = np.asarray(payload.get("p0"), dtype=np.float64).reshape(3)
+                        except Exception:
+                            p0_vec = None
+                contact_by_joint[str(jn)] = {"c": c_val, "p": p4, "n": n_vec, "p0": p0_vec}
+            return contact_by_joint
+
+        # 兼容：若用户直接传 { "LHIP": {"c":..,"p":[..]} , ... }
+        for k, v in contact.items():
+            if k in ("v", "order", "c", "p", "joints"):
+                continue
+            if isinstance(v, dict) and ("c" in v or "p" in v):
+                try:
+                    c_val = float(v.get("c", 0.0))
+                except Exception:
+                    c_val = 0.0
+                p4 = None
+                if "p" in v:
+                    try:
+                        p4 = np.asarray(v.get("p"), dtype=np.float32).reshape(4)
+                    except Exception:
+                        p4 = None
+                n_vec = None
+                p0_vec = None
+                if "n" in v:
+                    try:
+                        n_vec = np.asarray(v.get("n"), dtype=np.float64).reshape(3)
+                    except Exception:
+                        n_vec = None
+                if "p0" in v:
+                    try:
+                        p0_vec = np.asarray(v.get("p0"), dtype=np.float64).reshape(3)
+                    except Exception:
+                        p0_vec = None
+                contact_by_joint[str(k)] = {"c": c_val, "p": p4, "n": n_vec, "p0": p0_vec}
+
+        return contact_by_joint
 
     def __init__(self, debug=False):
         mu = 0.6
@@ -77,12 +241,8 @@ class PhysicsOptimizer:
         self.last_x = []
         self.q = None
         self.qdot = np.zeros(self.model.qdot_size)
-        # 上一帧接触点的力（用于平滑约束），key = (joint_name, point_label)，value = np.ndarray shape(3,)
-        self.prev_contact_forces = {}
-        # 上一帧左右脚各自的脚底合力（用于门控）；shape(3,)
-        self.prev_left_foot_grf = None
-        self.prev_right_foot_grf = None
         self.reset_states()
+        self.frame_idx = 0
 
     @staticmethod
     def _calc_total_mass_from_urdf(urdf_file_path: str) -> float:
@@ -121,35 +281,45 @@ class PhysicsOptimizer:
         self.last_x = []
         self.q = None
         self.qdot = np.zeros(self.model.qdot_size)
-        self.prev_contact_forces = {}
-        self.prev_left_foot_grf = None
-        self.prev_right_foot_grf = None
+        self.frame_idx = 0
 
     def optimize_frame(self, pose, jvel, contact, acc):
+        frame_idx = int(self.frame_idx)
+        self.frame_idx += 1
         # === 论文符号对照 ===
         # q_ref: 论文中的“参考运动” q̂ / φ（网络预测的姿态），这里转换到RBDL表示的广义坐标 q_ref
         # v_ref: 论文中的关节速度 v（网络预测），用于构造 r_ref / r̈_des（Eq.(4)(5)）
         # contact: 论文中的 foot-ground contact probabilities c（2维：左右脚）；本仓库支持更丰富结构，见下
         q_ref = smpl_to_rbdl(pose, torch.zeros(3))[0]  # 神经网络预测的姿态（转换到RBDL广义坐标）
+        # 记录每一帧“Unity/上层送来的参考姿态”（这里对应 q_ref）
+        try:
+            record_q_frame(q_ref=q_ref, frame_idx=frame_idx)
+        except Exception:
+            # 记录失败不应影响主流程
+            pass
         v_ref = jvel if isinstance(jvel, np.ndarray) else jvel.numpy()  # 神经网络预测的关节速度
-        # contact 既可能来自网络输出（torch.Tensor），也可能来自Unity传入（list/np.ndarray）
+        # contact 既可能来自网络输出（torch.Tensor），也可能来自Unity传入（list/np.ndarray），或新结构 dict/json
+        contact_by_joint: Optional[Dict[str, Dict[str, Any]]] = None
         if isinstance(contact, torch.Tensor):
             c_ref = contact.sigmoid().detach().cpu().numpy().astype(np.float32).reshape(-1)
         elif contact is None:
             c_ref = np.zeros((0,), dtype=np.float32)
+        elif isinstance(contact, dict):
+            c_ref = np.zeros((0,), dtype=np.float32)
+            contact_by_joint = self._parse_contact_dict(contact)
         else:
             c_ref = np.asarray(contact, dtype=np.float32).reshape(-1)
 
-        # [Repo扩展/非论文] contact 新结构（10 floats）：
-        # [0]=左脚接触程度, [1]=右脚接触程度
-        # [2:6]=左脚4点(0/1), [6:10]=右脚4点(0/1)
-        # 兼容旧结构（2 floats）：仅左右脚接触程度
+        # 已移除旧格式 contact=10个float（2+8：每脚4点mask）。
+        # 兼容极简结构（2 floats）：仅左右脚接触程度（与论文一致，也用于网络输出）。
+        if (not isinstance(contact, torch.Tensor)) and (not isinstance(contact, dict)) and (c_ref.size == 10):
+            raise ValueError("已移除旧格式 contact=10个float（2+8）。请改用 dict/json 新结构。")
+
         foot_stable = np.zeros(2, dtype=np.float32)
         if c_ref.size >= 1:
             foot_stable[0] = float(c_ref[0])
         if c_ref.size >= 2:
             foot_stable[1] = float(c_ref[1])
-        foot_point_flags = c_ref[2:10].copy() if c_ref.size >= 10 else None
 
         a_ref = acc.numpy() if isinstance(acc, torch.Tensor) else np.array(acc)   # IMU传感器测量的加速度
         q = self.q
@@ -177,15 +347,63 @@ class PhysicsOptimizer:
         left_point_to_collision_idx = {}   # key: 0..3 -> collision_idx
         right_point_to_collision_idx = {}  # key: 0..3 -> collision_idx
 
-        # 记录每个 collision point 的元信息，便于debug输出与回传结构化GRF
-        collision_point_meta = []  # list[tuple[str joint_name, str point_label]]
+        # 记录每个 collision point 的元信息，便于构造“无滑动/防穿透约束”与回传结构化GRF。
+        # 每个元素是一个 dict，尽量保持字段清晰，避免隐式约定：
+        # - joint_name: str
+        # - joint_id: Body enum
+        # - point_label: str（脚底4点标签或 point-i）
+        # - pb: np.ndarray shape(3,)（接触点在 body 坐标系下的坐标，用于 calc_point_Jacobian/velocity）
+        collision_point_meta = []
 
-        def _add_contact_point(joint_name: str, joint_id: int, pos: np.ndarray, point_i: int, point_map: Optional[dict]):
-            """添加一个接触点到QP（collision_points + Jacobian），并可选记录脚底点映射。"""
+        # 对“无滑动约束”使用的接触程度（0~1）：joint_name -> c
+        # - dict contact：使用每个关节自己的 c
+        # - 非 dict contact：目前只支持左右脚（2 floats），因此这里只会包含 LFOOT/RFOOT
+        contact_degree_by_joint = {}
+        if contact_by_joint is not None:
+            for jn in contact_by_joint:
+                try:
+                    contact_degree_by_joint[str(jn)] = float(contact_by_joint[jn].get("c", 0.0))
+                except Exception:
+                    contact_degree_by_joint[str(jn)] = 0.0
+        else:
+            # 仅 2 floats：左右脚接触程度
+            contact_degree_by_joint["LFOOT"] = float(foot_stable[0])
+            contact_degree_by_joint["RFOOT"] = float(foot_stable[1])
+
+        def _add_contact_point(
+            joint_name: str,
+            joint_id: int,
+            pos: np.ndarray,
+            point_i: int,
+            point_map: Optional[dict],
+            surface_n: np.ndarray,
+            surface_p0: np.ndarray,
+        ):
+            """
+            添加一个接触点到QP（collision_points + Jacobian），并可选记录脚底点映射。
+
+            Route-B: 每个接触点带接触面 (n, p0)；并保存局部基 R_T（把世界向量转到 [t1,n,t2] 坐标）。
+            """
             ps = self.support_polygon[point_i] + pos
             collision_points.append(ps)
-            collision_point_meta.append((joint_name, foot_point_labels[point_i] if point_i < 4 else f'point-{point_i}'))
             pb = self.model.calc_base_to_body_coordinates(q, joint_id, ps)
+            point_label = foot_point_labels[point_i] if point_i < 4 else f"point-{point_i}"
+
+            n_unit = self._safe_unit_vector(surface_n, np.array([0.0, 1.0, 0.0], dtype=np.float64))
+            t1, t2 = self._make_tangent_basis(n_unit)
+            R_T = np.vstack([t1.reshape(1, 3), n_unit.reshape(1, 3), t2.reshape(1, 3)]).astype(np.float64)
+
+            collision_point_meta.append(
+                {
+                    "joint_name": str(joint_name),
+                    "joint_id": joint_id,
+                    "point_label": str(point_label),
+                    "pb": pb,
+                    "surface_n": n_unit,
+                    "surface_p0": np.asarray(surface_p0, dtype=np.float64).reshape(3),
+                    "R_T": R_T,
+                }
+            )
             Js.append(self.model.calc_point_Jacobian(q, joint_id, pb))
             if point_map is not None and point_i < 4:
                 point_map[point_i] = len(collision_points) - 1
@@ -194,43 +412,102 @@ class PhysicsOptimizer:
             joint_id = vars(Body)[joint_name]
             pos = self.model.calc_body_position(q, joint_id)
 
-            # [Repo扩展/非论文] 新结构：脚底接触点由 foot_point_flags(0/1) 显式给定（每只脚4点）
-            # - 论文原始做法：一旦判定“该脚关节接触”，就取该关节处 L×L 方形的 4 个顶点作为接触点（facet contact）。
-            # - 本扩展做法：允许上层（Unity/其他模块）直接指定 4 点里哪些点参与接触，用于更精细/可控的足底接触建模。
-            if joint_id in (Body.LFOOT, Body.RFOOT) and foot_point_flags is not None:
-                is_left = (joint_id == Body.LFOOT)
-                flags = foot_point_flags[:4] if is_left else foot_point_flags[4:]
-                point_map = left_point_to_collision_idx if is_left else right_point_to_collision_idx
-                selected = [i for i, f in enumerate(flags) if float(f) > 0.5]
+            # 新结构：全关节 contact (c + p4) 优先（替代高度阈值接触判定；保留防穿模兜底）
+            if contact_by_joint is not None:
+                payload = contact_by_joint.get(joint_name, None)
+                c_val = 0.0
+                p4 = None
+                n_vec = None
+                p0_vec = None
+                if isinstance(payload, dict):
+                    try:
+                        c_val = float(payload.get("c", 0.0))
+                    except Exception:
+                        c_val = 0.0
+                    p4 = payload.get("p", None)
+                    n_vec = payload.get("n", None)
+                    p0_vec = payload.get("p0", None)
 
-                # 若显式点接触为空，但模型穿透地面，则仍然加约束防止穿模（保留原意）
-                if selected or pos[1] <= self.params['floor_y']:
+                # 接触点判定：严格以 p4（显式指定每个点是否接触）为准。
+                # - 只要 p4 中有任意点被激活，就认为该关节接触；只加入被激活的点。
+                # - c_val（接触程度）不参与“是否接触/有哪些接触点”的判断，只用于后面的“无滑动约束阈值”。
+                use_indices = []
+                if p4 is not None:
+                    p4_arr = None
+                    try:
+                        p4_arr = np.asarray(p4, dtype=np.float32).reshape(-1)
+                    except Exception:
+                        p4_arr = None
+
+                    if p4_arr is not None and p4_arr.size >= 4:
+                        i = 0
+                        while i < 4:
+                            try:
+                                if float(p4_arr[i]) > 0.5:
+                                    use_indices.append(int(i))
+                            except Exception:
+                                pass
+                            i += 1
+
+                if len(use_indices) > 0:
                     collision_joints.append(joint_name)
-                    use_indices = selected if selected else [0, 1, 2, 3]
+                    point_map = None
+                    if joint_id == Body.LFOOT:
+                        point_map = left_point_to_collision_idx
+                    elif joint_id == Body.RFOOT:
+                        point_map = right_point_to_collision_idx
+
+                    # 默认接触面：地面（y=floor_y）。Route-B 下若用户提供 n/p0 则覆盖默认。
+                    floor_y = float(self.params.get("floor_y", 0.0))
+                    default_n = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+                    default_p0 = np.array([0.0, floor_y, 0.0], dtype=np.float64)
+                    surface_n = default_n if n_vec is None else np.asarray(n_vec, dtype=np.float64).reshape(3)
+                    surface_p0 = default_p0 if p0_vec is None else np.asarray(p0_vec, dtype=np.float64).reshape(3)
+
                     for point_i in use_indices:
-                        _add_contact_point(joint_name, joint_id, pos, point_i, point_map)
+                        _add_contact_point(joint_name, joint_id, pos, int(point_i), point_map, surface_n, surface_p0)
                 continue
 
-            # 旧结构/其它关节：维持论文的“接触判定 + 固定4点facet contact”
-            # 论文 Contact Determination（Page 5）要点：
-            # - 脚：df < 0.5cm 或 (df < 3cm 且 接触概率 cf > 0.5)
-            # - 非脚：dn < 0.5cm
-            # 这里把“距离”用 pos[1] 与 floor_y 的差近似，3cm 对应 floor_y + 0.03，0.5cm 近似为 pos[1] <= floor_y。
-            if (joint_id == Body.LFOOT and foot_stable[0] > 0.5 and pos[1] <= self.params['floor_y'] + 0.03) or \
-               (joint_id == Body.RFOOT and foot_stable[1] > 0.5 and pos[1] <= self.params['floor_y'] + 0.03) or \
-               (pos[1] <= self.params['floor_y']):
-                collision_joints.append(joint_name)
-                point_map = None
-                if joint_id == Body.LFOOT:
-                    point_map = left_point_to_collision_idx
-                elif joint_id == Body.RFOOT:
-                    point_map = right_point_to_collision_idx
-
-                for point_i in range(4):
-                    _add_contact_point(joint_name, joint_id, pos, point_i, point_map)
+            # 非 dict 输入时：仅保留“左右脚接触判定 + 防穿模兜底”。
+            # - Unity dict 模式下，接触完全由上层决定，不走这里。
+            # - 网络输出/极简输入（2 floats）时，只提供左右脚概率，因此这里也只对脚生效。
+            floor_y = float(self.params["floor_y"])
+            if joint_id in (Body.LFOOT, Body.RFOOT):
+                is_left = (joint_id == Body.LFOOT)
+                prob = float(foot_stable[0] if is_left else foot_stable[1])
+                # 3cm 门控（论文脚部判定的一部分）+ 防穿模兜底（脚低于地面时强制接触）
+                should_contact = (prob > 0.5 and pos[1] <= floor_y + 0.03) or (pos[1] <= floor_y)
+                if should_contact:
+                    collision_joints.append(joint_name)
+                    point_map = left_point_to_collision_idx if is_left else right_point_to_collision_idx
+                    surface_n = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+                    surface_p0 = np.array([0.0, float(floor_y), 0.0], dtype=np.float64)
+                    for point_i in range(4):
+                        _add_contact_point(joint_name, joint_id, pos, point_i, point_map, surface_n, surface_p0)
                     
         Js = np.vstack(Js)
         nc = len(collision_points)
+
+        # === Debug: print contact joints & contact points each frame ===
+        # 开关：physics_parameters.json -> debug_print_contacts = 1
+        if float(self.params.get("debug_print_contacts", 0.0)) > 0.5:
+            try:
+                print(f"[contacts] frame={frame_idx} nc={nc} joints={collision_joints}")
+                for i in range(min(nc, len(collision_point_meta))):
+                    meta = collision_point_meta[i]
+                    if isinstance(meta, dict):
+                        jn = str(meta.get("joint_name", ""))
+                        pl = str(meta.get("point_label", ""))
+                    elif isinstance(meta, (list, tuple)) and len(meta) >= 2:
+                        jn = str(meta[0])
+                        pl = str(meta[1])
+                    else:
+                        jn = ""
+                        pl = str(meta)
+                    pt = np.asarray(collision_points[i], dtype=np.float64).reshape(3)
+                    print(f"  - {i}: {jn}/{pl} pos=({pt[0]:.4f},{pt[1]:.4f},{pt[2]:.4f})")
+            except Exception as e:
+                print(f"[contacts] debug_print_contacts failed: {e}")
 
         # === QP组装方式（对应论文 Eq.7 的 E_PD + E_reg）===
         # 这里把目标拆成三块最小二乘：
@@ -332,7 +609,18 @@ class PhysicsOptimizer:
         # 这里用 A = diag(d_c I_3) 实现：||A λ||^2 = Σ_c d_c^2 ||λ_c||^2（与论文形式等价到权重尺度上）
         if True:
             if nc != 0:
-                A = [np.eye(3) * max(cp[1] - self.params['floor_y'], 0.005) for cp in collision_points]
+                # Route-B: 用“点到接触平面的符号距离”替代 (y-floor_y)
+                #   s = n · (p - p0)  (s<0 表示穿透到平面内侧)
+                #   d_c = max(s, eps) -> 离表面越远越压制接触力；接近/穿透时允许支撑力。
+                eps = 0.005
+                A = []
+                for i, cp in enumerate(collision_points):
+                    meta = collision_point_meta[i] if i < len(collision_point_meta) else {}
+                    n = np.asarray(meta.get("surface_n", [0.0, 1.0, 0.0]), dtype=np.float64).reshape(3)
+                    p0 = np.asarray(meta.get("surface_p0", [0.0, float(self.params.get("floor_y", 0.0)), 0.0]), dtype=np.float64).reshape(3)
+                    s = float(np.dot(n, (np.asarray(cp, dtype=np.float64).reshape(3) - p0)))
+                    d_c = max(s, eps)
+                    A.append(np.eye(3) * d_c)
                 A = art.math.block_diagonal_matrix_np(A)
                 As2.append(A * self.params['coeff_lambda'])
                 bs2.append(np.zeros(nc * 3))
@@ -340,7 +628,7 @@ class PhysicsOptimizer:
         # [Repo扩展/非论文] 基于“重心投影”的左右脚法向力(Fy)分配先验（soft penalty）
         # 你提到的诉求：双脚8点都触地时，希望左右脚承重大小能随重心偏移而变化。
         # 现有实现只靠动力学平衡 + 正则，双支撑时 λ 分配往往冗余，容易趋向均分/数值偏置。
-        #
+        
         # 这里采用一个保持QP线性的“比例先验”：
         #   设 Fy_L = Σ_{i∈L} Fy_i, Fy_R = Σ_{i∈R} Fy_i
         #   用 CoM 在左右脚中心连线 (xz 平面) 上的投影得到 α∈[0,1]（α=0靠左脚，α=1靠右脚）
@@ -374,11 +662,15 @@ class PhysicsOptimizer:
                             alpha = float(np.clip(t, 0.0, 1.0))
 
                             row = np.zeros((nc * 3,), dtype=np.float64)
-                            # 取各点的 Fy 分量：lambda 排列为 [Fx0,Fy0,Fz0,...]，Fy 在 1::3
+                            # Route-B: “法向力”不再固定为 Fy，而是 fn = n^T f。
                             for i in right_indices:
-                                row[i * 3 + 1] += (1.0 - alpha)
+                                meta_i = collision_point_meta[i] if i < len(collision_point_meta) else {}
+                                n_i = np.asarray(meta_i.get("surface_n", [0.0, 1.0, 0.0]), dtype=np.float64).reshape(3)
+                                row[i * 3: i * 3 + 3] += (1.0 - alpha) * n_i
                             for i in left_indices:
-                                row[i * 3 + 1] += (-alpha)
+                                meta_i = collision_point_meta[i] if i < len(collision_point_meta) else {}
+                                n_i = np.asarray(meta_i.get("surface_n", [0.0, 1.0, 0.0]), dtype=np.float64).reshape(3)
+                                row[i * 3: i * 3 + 3] += (-alpha) * n_i
 
                             As2.append(row.reshape(1, -1) * coeff)
                             bs2.append(np.zeros((1,), dtype=np.float64))
@@ -392,77 +684,104 @@ class PhysicsOptimizer:
                 np.eye(self.model.qdot_size - 6) * self.params['coeff_tau']#关节扭矩约束
             ]))
             bs3.append(np.zeros(self.model.qdot_size))
-
-        # [Repo扩展/非论文] 约束虚拟力（tau[:3]）的“模长”上限（只处理前三维）
-        # 说明：
-        # - 真实的 L2 范数约束 ||tau[:3]||_2 <= r 属于二阶锥约束（SOCP），普通QP求解器不支持。
-        # - 这里用保守的线性近似：对每个分量施加盒约束 |tau_i| <= r/sqrt(3)，从而保证 ||tau[:3]||_2 <= r。
-        # - 若你希望更“贴近球形”的近似，需要引入更多方向的线性面或切换SOCP求解器。
-        if True:
-            vf_norm_max = float(self.params.get('virtual_force_norm_max', 0.0))
-            if vf_norm_max > 0.0:
-                bound = vf_norm_max / np.sqrt(3.0)
-                rows = []
-                rhs = []
-                for i in range(3):
-                    row = np.zeros(self.model.qdot_size, dtype=np.float64)
-                    row[i] = 1.0
-                    rows.append(row)
-                    rhs.append(bound)
-                    rows.append(-row)
-                    rhs.append(bound)
-                Gs3.append(np.vstack(rows))
-                hs3.append(np.asarray(rhs, dtype=np.float64))
-
         # === Sliding / Anti-penetration Constraints（论文 Eq.7: ṙ_j(q̈) ∈ C, Page 6）===
-        # 论文：对“接触关节”的速度施加边界，水平滑动速度 < σ，同时防止向下穿透。
-        # 实现：使用离散时间近似 v_{t+1} ≈ v_t + Δt * J * q̈，将速度范围改写成 q̈ 的线性不等式。
-        # 这里先对非脚关节（test_contact_joints[:-2]）在低于地面时施加较宽松的盒约束。
+        # 论文：对“接触关节/接触点”的速度施加边界，水平滑动速度 < σ，同时防止向下穿透。
+        # 实现：逐接触点构造约束（更符合“接触点由上层输入决定”的设定）。
+        # 使用离散时间近似：v_{t+1} ≈ v_t + Δt * J * q̈
+        #
+        # 关键点：每个接触点所属关节的接触程度 c(0~1) 都会影响无滑动阈值：
+        # - c 越大 -> 阈值 th 越小 -> 无滑动越严格
+        # - c 越小 -> 阈值 th 越大 -> 无滑动更宽松
+        #
+        # safe_c 的裁剪用于避免 log(0)/数值爆炸（工程保护）。
         if True:
-            for joint_name in self.test_contact_joints[:-2]:
-                joint_id = vars(Body)[joint_name]
-                pos = self.model.calc_body_position(q, joint_id)
-                if pos[1] <= self.params['floor_y']:
-                    J = self.model.calc_point_Jacobian(q, joint_id)
-                    v = self.model.calc_point_velocity(q, qdot, joint_id)
-                    Gs1.append(-self.params['delta_t'] * J)
-                    hs1.append(v - [-1e-1, 0, -1e-1])
-                    Gs1.append(self.params['delta_t'] * J)
-                    hs1.append(-v + [1e-1, 1e2, 1e-1])
+            dt = float(self.params["delta_t"])
+            c_clip_min = 1e-6
+            c_clip_max = 0.84999
+            c_ref_max = 0.85
+            th_min = 0.01
 
-        # 对脚关节的无滑动约束：用 stable（论文中的 contact probability c，经 sigmoid 后 ∈ (0,1)）自适应阈值。
-        # stable 越大 -> 越“确信在接触” -> th 越小（更严格的无滑动）；stable 越小 -> th 越大（更宽松）。
-        # [Repo扩展/非论文] safe_stable 的裁剪用于避免 log(0)/数值爆炸（工程保护，不影响论文主思想）。
-        if True:
-            for joint_name, stable in zip(['LFOOT', 'RFOOT'], foot_stable):
-                joint_id = vars(Body)[joint_name]
-                pos = self.model.calc_body_position(q, joint_id)
+            i = 0
+            while i < len(collision_point_meta):
+                meta = collision_point_meta[i]
+                joint_name = str(meta.get("joint_name", ""))
+                joint_id = meta.get("joint_id", None)
+                pb = meta.get("pb", None)
 
+                if joint_id is None or pb is None:
+                    i += 1
+                    continue
 
-                J = self.model.calc_point_Jacobian(q, joint_id)
-                v = self.model.calc_point_velocity(q, qdot, joint_id)
+                # 取该点所属关节的接触程度（默认0）
+                c_val = 0.0
+                if joint_name in contact_degree_by_joint:
+                    try:
+                        c_val = float(contact_degree_by_joint[joint_name])
+                    except Exception:
+                        c_val = 0.0
 
-                # 添加对stable值的保护，防止出现无穷大
-                safe_stable = max(min(stable, 0.84999), 1e-6)  # 限制范围在[1e-6, 0.84999]
+                # 计算该接触点的 J 与 v（点速度），并转换到接触面局部坐标系 [t1, n, t2]
+                J_world = self.model.calc_point_Jacobian(q, joint_id, pb)
+                v_world = self.model.calc_point_velocity(q, qdot, joint_id, pb)
+                R_T = np.asarray(meta.get("R_T", np.eye(3)), dtype=np.float64).reshape(3, 3)
+                J = R_T @ J_world
+                v = R_T @ np.asarray(v_world, dtype=np.float64).reshape(3)
 
-                th_raw = -np.log(safe_stable / 0.85)
-                th = max(th_raw, 0.01)
-                th_y = (self.params['floor_y'] - pos[1]) / self.params['delta_t']
-                Gs1.append(-self.params['delta_t'] * J)
-                hs1.append(v - [-th, th_y, -th])
-                Gs1.append(self.params['delta_t'] * J)
-                hs1.append(-v + [th, max(th, th_y) + 1e-6, th])
+                # 由 c_val 生成水平无滑动阈值 th
+                safe_c = c_val
+                if safe_c < c_clip_min:
+                    safe_c = c_clip_min
+                if safe_c > c_clip_max:
+                    safe_c = c_clip_max
+
+                th_raw = -np.log(safe_c / c_ref_max)
+                th = th_raw
+                if th < th_min:
+                    th = th_min
+
+                # 防穿透（Route-B）：约束下一帧法向速度，使得 s_{t+1} >= 0
+                # s = n · (p - p0)，其中 n/p0 为接触面（世界坐标）
+                cp = np.asarray(collision_points[i], dtype=np.float64).reshape(3) if i < len(collision_points) else np.zeros(3, dtype=np.float64)
+                n = np.asarray(meta.get("surface_n", [0.0, 1.0, 0.0]), dtype=np.float64).reshape(3)
+                p0 = np.asarray(meta.get("surface_p0", [0.0, float(self.params.get("floor_y", 0.0)), 0.0]), dtype=np.float64).reshape(3)
+                s = float(np.dot(n, (cp - p0)))
+                # v_next_n >= -s/dt
+                th_n = (-s) / dt
+
+                Gs1.append(-dt * J)
+                hs1.append(v - [-th, th_n, -th])
+                Gs1.append(dt * J)
+                hs1.append(-v + [th, max(th, th_n) + 1e-6, th])
+
+                i += 1
 
         # === Friction Cone Constraint（论文 Eq.7: λ ∈ F, Page 6）===
         # 论文指出摩擦锥可线性化以保持QP；这里用4个半空间拼成“金字塔”近似库仑摩擦锥（μ=0.6）。
+        # Route-B: 不再假设“Y轴是法向”，而是对每个接触点用局部基 [t1,n,t2] 施加摩擦锥：
+        #   f_local = R_T f_world,  A_local f_local <= 0  => (A_local R_T) f_world <= 0
         if True:
             if nc > 0:
-                Gs2.append(art.math.block_diagonal_matrix_np([self.friction_constraint_matrix] * nc))
-                hs2.append(np.zeros(nc * 4))
+                blocks: List[np.ndarray] = []
+                for i in range(nc):
+                    meta = collision_point_meta[i] if i < len(collision_point_meta) else {}
+                    R_T = np.asarray(meta.get("R_T", np.eye(3)), dtype=np.float64).reshape(3, 3)
+                    blocks.append((self.friction_constraint_matrix @ R_T).astype(np.float64))
+                Gs2.append(art.math.block_diagonal_matrix_np(blocks))
+                hs2.append(np.zeros(nc * 4, dtype=np.float64))
 
-        # === [Repo扩展] Total GRF Y Upper Bound（硬约束）===
-        # 约束“所有接触点地面反力”的法向（Y轴）合力上限：
-        #   Σ_i Fy_i <= k * m * g
+                # 可选：法向力非负（防止“吸地/拉物体”）: fn = n^T f >= 0  => (-n^T) f <= 0
+                if float(self.params.get("enforce_contact_fn_nonnegative", 1.0)) > 0.5:
+                    nn_blocks: List[np.ndarray] = []
+                    for i in range(nc):
+                        meta = collision_point_meta[i] if i < len(collision_point_meta) else {}
+                        n = np.asarray(meta.get("surface_n", [0.0, 1.0, 0.0]), dtype=np.float64).reshape(3)
+                        nn_blocks.append((-n.reshape(1, 3)).astype(np.float64))
+                    Gs2.append(art.math.block_diagonal_matrix_np(nn_blocks))
+                    hs2.append(np.zeros(nc, dtype=np.float64))
+
+        # === [Repo扩展] Total GRF Normal Upper Bound（硬约束）===
+        # Route-B: 不再固定用 Fy，而是约束“所有接触点的法向力分量”合力上限：
+        #   Σ_i (n_i^T f_i) <= k * m * g
         # - k 通过 physics_parameters.json 的 max_total_grf_y_multiple 配置（默认建议 3.0）
         # - m 为 (人体质量 + 外载荷质量)：
         #   * 人体质量 self.body_mass_kg（优先读取 params['body_mass_kg']，否则从URDF惯性质量汇总）
@@ -476,9 +795,11 @@ class PhysicsOptimizer:
                     mR = float(self.params.get('dumbbell_mass_right_kg', 0.0))
                     total_mass = float(self.body_mass_kg) + max(mL, 0.0) + max(mR, 0.0)
                     fy_max = k * total_mass * float(self.gravity)
-                    # λ 排列为 [Fx0,Fy0,Fz0, Fx1,Fy1,Fz1, ...]，因此取每个点的 Fy 分量求和
                     row = np.zeros((nc * 3,), dtype=np.float64)
-                    row[1::3] = 1.0
+                    for i in range(nc):
+                        meta = collision_point_meta[i] if i < len(collision_point_meta) else {}
+                        n_i = np.asarray(meta.get("surface_n", [0.0, 1.0, 0.0]), dtype=np.float64).reshape(3)
+                        row[i * 3: i * 3 + 3] += n_i
                     Gs2.append(row.reshape(1, -1))
                     hs2.append(np.asarray([fy_max], dtype=np.float64))
         # === Equation of Motion（论文 Eq.7: M q̈ + h = Jcᵀ λ + τ）===
@@ -580,25 +901,6 @@ class PhysicsOptimizer:
         GRF = x[self.model.qdot_size:-self.model.qdot_size]
         tau = x[-self.model.qdot_size:]
 
-        # 更新“上一帧接触力”状态：只保留当前帧仍在接触集合中的点
-        # 如果某点不再接触（本帧未进入 collision_points），它将自动从字典中消失，从而不再受平滑约束
-        if nc > 0:
-            grf_components_for_state = GRF.reshape(-1, 3)
-            new_prev = {}
-            for i in range(min(nc, len(collision_point_meta))):
-                key = collision_point_meta[i]
-                new_prev[key] = grf_components_for_state[i].copy()
-            self.prev_contact_forces = new_prev
-            # 只统计脚底点（左右脚各4点）各自合力，忽略其它接触点
-            left_indices = sorted(left_point_to_collision_idx.values())
-            right_indices = sorted(right_point_to_collision_idx.values())
-            self.prev_left_foot_grf = np.sum(grf_components_for_state[left_indices], axis=0).copy() if len(left_indices) > 0 else None
-            self.prev_right_foot_grf = np.sum(grf_components_for_state[right_indices], axis=0).copy() if len(right_indices) > 0 else None
-        else:
-            self.prev_contact_forces = {}
-            self.prev_left_foot_grf = None
-            self.prev_right_foot_grf = None
-
         # 添加调试信息，打印 tau 和 GRF 的形状
         #                                                                                                            if self.debug:
             # 计算并输出GRF在所有轴上的合力
@@ -626,7 +928,9 @@ class PhysicsOptimizer:
             #     # 打印每个接触点的力分量，并标注是哪个关节以及具体的点
             #     for i, point_force in enumerate(grf_components):
             #         if i < len(collision_point_meta):
-            #             joint_name, point_label = collision_point_meta[i]
+            #             meta = collision_point_meta[i]
+            #             joint_name = str(meta.get("joint_name", ""))
+            #             point_label = str(meta.get("point_label", ""))
             #             print(f"GRF component [{joint_name} - {point_label}]: "
             #                   f"X: {point_force[0]:.6f}, Y: {point_force[1]:.6f}, Z: {point_force[2]:.6f}")
             #         else:
@@ -662,35 +966,63 @@ class PhysicsOptimizer:
         labeled_grf = {}
         grf_components = GRF.reshape(-1, 3) if nc > 0 else np.zeros((0, 3), dtype=np.float32)
 
-        # 始终输出左右脚各4点（固定顺序），未参与QP的点补0，保证Unity侧解包长度稳定（8点*3=24 floats）
-        left_grf_data = []
-        for i, point_label in enumerate(foot_point_labels):
-            idx = left_point_to_collision_idx.get(i, None)
-            force = grf_components[idx].tolist() if idx is not None and idx < len(grf_components) else [0.0, 0.0, 0.0]
-            left_grf_data.append({'point': point_label, 'force': force})
-        labeled_grf['left_foot'] = left_grf_data
+        # [Repo扩展] 返回“全接触点列表（固定全集）”：
+        # - 以 test_contact_joints 为全集，对每个关节固定输出 4 个点（support_polygon 的四角）
+        # - 若该点本帧进入 QP 接触集合，则填入对应 GRF；否则 force 填 [0,0,0]
+        #
+        # 注意：
+        # - 即便上层显式只选择了部分点参与接触，这里仍会输出 4 点，其余点为 0，便于 Unity 侧做固定结构解析。
+        contact_force_by_meta = {}
+        if nc > 0 and len(collision_point_meta) > 0:
+            n_out = min(nc, len(collision_point_meta), len(grf_components))
+            for idx in range(n_out):
+                meta = collision_point_meta[idx]
+                # 用可哈希的稳定键： (joint_name, point_label)
+                joint_name = str(meta.get("joint_name", "")) if isinstance(meta, dict) else ""
+                point_label = str(meta.get("point_label", "")) if isinstance(meta, dict) else ""
+                key = (joint_name, point_label)
+                contact_force_by_meta[key] = grf_components[idx].tolist()
 
-        right_grf_data = []
-        for i, point_label in enumerate(foot_point_labels):
-            idx = right_point_to_collision_idx.get(i, None)
-            force = grf_components[idx].tolist() if idx is not None and idx < len(grf_components) else [0.0, 0.0, 0.0]
-            right_grf_data.append({'point': point_label, 'force': force})
-        labeled_grf['right_foot'] = right_grf_data
+        contacts = []
+        for joint_name in self.test_contact_joints:
+            for point_label in foot_point_labels:  # 固定 4 点
+                force = contact_force_by_meta.get((joint_name, point_label), [0.0, 0.0, 0.0])
+                contacts.append({
+                    'joint': str(joint_name),
+                    'point': str(point_label),
+                    'force': force,
+                })
+        labeled_grf['contacts'] = contacts
+
+        # # 始终输出左右脚各4点（固定顺序），未参与QP的点补0，保证Unity侧解包长度稳定（8点*3=24 floats）
+        # left_grf_data = []
+        # for i, point_label in enumerate(foot_point_labels):
+        #     idx = left_point_to_collision_idx.get(i, None)
+        #     force = grf_components[idx].tolist() if idx is not None and idx < len(grf_components) else [0.0, 0.0, 0.0]
+        #     left_grf_data.append({'point': point_label, 'force': force})
+        # labeled_grf['left_foot'] = left_grf_data
+
+        # right_grf_data = []
+        # for i, point_label in enumerate(foot_point_labels):
+        #     idx = right_point_to_collision_idx.get(i, None)
+        #     force = grf_components[idx].tolist() if idx is not None and idx < len(grf_components) else [0.0, 0.0, 0.0]
+        #     right_grf_data.append({'point': point_label, 'force': force})
+        # labeled_grf['right_foot'] = right_grf_data
             
-        # Add other contact points if any
-        all_foot_indices = set(list(left_point_to_collision_idx.values()) + list(right_point_to_collision_idx.values()))
-        other_indices = [i for i in range(len(grf_components)) if i not in all_foot_indices]
-        if other_indices:
-            other_grf_data = []
-            for i, idx in enumerate(other_indices):
-                if idx < len(collision_point_meta):
-                    joint_name, point_label = collision_point_meta[idx]
-                    other_grf_data.append({
-                        'joint': joint_name,
-                        'point': point_label,
-                        'force': grf_components[idx].tolist()
-                    })
-            labeled_grf['other_contacts'] = other_grf_data
+        # # Add other contact points if any
+        # all_foot_indices = set(list(left_point_to_collision_idx.values()) + list(right_point_to_collision_idx.values()))
+        # other_indices = [i for i in range(len(grf_components)) if i not in all_foot_indices]
+        # if other_indices:
+        #     other_grf_data = []
+        #     for i, idx in enumerate(other_indices):
+        #         if idx < len(collision_point_meta):
+        #             joint_name, point_label = collision_point_meta[idx]
+        #             other_grf_data.append({
+        #                 'joint': joint_name,
+        #                 'point': point_label,
+        #                 'force': grf_components[idx].tolist()
+        #             })
+        #     labeled_grf['other_contacts'] = other_grf_data
 
         # 返回广义力 τ（长度 = self.model.qdot_size = 75）
         # - τ[:6]：root residual force/torque（常被称为“虚拟力/残余力”）

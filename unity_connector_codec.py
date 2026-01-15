@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Dict, List, Optional, Tuple, Union, Any
 
 
@@ -11,7 +12,7 @@ GrfPayload = Union[List[float], Dict[str, Any], None]
 class UnityIncomingFrame:
     pose: List[float]
     tran: List[float]
-    contact: List[float]
+    contact: Any
     velocity: List[float]
 
 
@@ -48,23 +49,13 @@ class UnityMessageCodec:
         pose_str = self.DELIM_FLOAT.join(["%g" % float(v) for v in (pose_data or [])])
         tran_str = self.DELIM_FLOAT.join(["%g" % float(v) for v in (tran_data or [])])
 
-        # GRF：兼容旧格式(list[float]) 与新格式(dict)
+        # GRF：
+        # - 旧格式：list[float]（逗号分隔浮点）
+        # - 新格式：dict（发送为 JSON 字符串，包含 contacts/left_foot/right_foot 等结构化字段）
         if isinstance(grf_data, dict):
-            flattened_grf: List[float] = []
-
-            if "left_foot" in grf_data:
-                for point_data in grf_data["left_foot"]:
-                    flattened_grf.extend(point_data.get("force", [0.0, 0.0, 0.0]))
-            else:
-                flattened_grf.extend([0.0, 0.0, 0.0] * 4)
-
-            if "right_foot" in grf_data:
-                for point_data in grf_data["right_foot"]:
-                    flattened_grf.extend(point_data.get("force", [0.0, 0.0, 0.0]))
-            else:
-                flattened_grf.extend([0.0, 0.0, 0.0] * 4)
-
-            grf_str = self.DELIM_FLOAT.join(["%g" % float(v) for v in flattened_grf])
+            # 注意：协议分段使用 '#'，结束符使用 '$'，JSON 中不包含这些字符，安全。
+            # 为降低带宽，使用紧凑 separators；同时 ensure_ascii=False 保留中文/非ASCII（若有）。
+            grf_str = json.dumps(grf_data, ensure_ascii=False, separators=(",", ":"))
         elif grf_data:
             grf_str = self.DELIM_FLOAT.join(["%g" % float(v) for v in grf_data])  # type: ignore[arg-type]
         else:
@@ -88,7 +79,16 @@ class UnityMessageCodec:
         pose_str, tran_str, contact_str, velocity_str = parts
         pose = [float(x) for x in pose_str.split(self.DELIM_FLOAT)] if pose_str else []
         tran = [float(x) for x in tran_str.split(self.DELIM_FLOAT)] if tran_str else []
-        contact = [float(x) for x in contact_str.split(self.DELIM_FLOAT)] if contact_str else []
+        # contact：推荐使用 JSON（dict/list）。CSV floats 仅用于极简旧结构（2 floats）。
+        contact: Any
+        contact_str_stripped = contact_str.strip()
+        if contact_str_stripped and (contact_str_stripped[0] == "{" or contact_str_stripped[0] == "["):
+            try:
+                contact = json.loads(contact_str_stripped)
+            except Exception as e:
+                raise ValueError(f"contact JSON 解析失败：{e}")
+        else:
+            contact = [float(x) for x in contact_str.split(self.DELIM_FLOAT)] if contact_str else []
         velocity = [float(x) for x in velocity_str.split(self.DELIM_FLOAT)] if velocity_str else []
         return UnityIncomingFrame(pose=pose, tran=tran, contact=contact, velocity=velocity)
 

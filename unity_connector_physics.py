@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, List, Optional
 
 
 class PhysicsOptimizerAdapter:
@@ -26,7 +26,7 @@ class PhysicsOptimizerAdapter:
         self,
         pose_data: List[float],
         jvel: List[float],
-        contact: List[float],
+        contact: Any,
         acc: Optional[List[float]] = None,
     ):
         import numpy as np  # 延迟导入：仅在启用物理优化时需要
@@ -38,9 +38,17 @@ class PhysicsOptimizerAdapter:
 
         poses = np.array([])
         velocitys = np.array([])
-        contacts = np.array([0.0, 0.0], dtype=np.float32)
-
-        processed_contact = [float(c) for c in contact] if contact is not None else []
+        # contact：仅支持
+        # - 新结构：dict/json（全关节 c+p4），交由 dynamics.py 解析
+        # - 2 floats：仅左右脚接触程度（网络输出/极简输入）
+        contact_payload: Any
+        if contact is None or isinstance(contact, dict):
+            contact_payload = contact
+        else:
+            processed_contact = [float(c) for c in contact]
+            if len(processed_contact) == 10:
+                raise ValueError("已移除旧格式 contact=10个float（2+8）。请改用 dict/json 新结构。")
+            contact_payload = processed_contact
 
         if len(pose_data) == 216:
             rotation_matrices = []
@@ -52,14 +60,6 @@ class PhysicsOptimizerAdapter:
         if len(jvel) == 72:
             velocitys = np.array(jvel).reshape(24, 3)
 
-        if len(processed_contact) == 2:
-            contacts = np.array(processed_contact, dtype=np.float32).reshape(2)
-        elif len(processed_contact) == 10:
-            contacts = np.array(processed_contact, dtype=np.float32).reshape(10)
-        elif len(processed_contact) > 0:
-            padded = (processed_contact + [0.0, 0.0])[:2]
-            contacts = np.array(padded, dtype=np.float32).reshape(2)
-
-        return self._optimizer.optimize_frame(poses, velocitys, contacts, acc)
+        return self._optimizer.optimize_frame(poses, velocitys, contact_payload, acc)
 
 
