@@ -93,17 +93,17 @@ class PhysicsOptimizer:
     @staticmethod
     def _parse_contact_dict(contact: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         """
-        解析 contact dict：全关节 (c + p4) + 可选 surface plane (n + p0)。
+        解析 contact dict：全关节 (c + p4) + 可选 surface plane (n + p0_local)。
 
         支持两类结构：
-        - 方案A（推荐）：{ "order": [...], "c":[...], "p":[[...],[...],...], "n":[[...],...], "p0":[[...],...] }
-        - 方案B：{ "joints": { "LHIP": {"c":0.2,"p":[0,0,0,0],"n":[0,1,0],"p0":[0,-0.87,0]}, ... } }
+        - 方案A（推荐）：{ "order": [...], "c":[...], "p":[[...],[...],...], "n":[[...],...],
+                           "p0_local":[[...],...] }
 
         返回：joint_name -> dict:
           - c: float (接触程度，用于无滑动阈值)
           - p: np.ndarray shape(4,) or None (四角点mask，决定哪些点加入QP)
           - n: np.ndarray shape(3,) or None (接触面法向，世界坐标；若不提供则走默认地面)
-          - p0: np.ndarray shape(3,) or None (接触面上一点，世界坐标；若不提供则走默认地面)
+          - p0_local: np.ndarray shape(3,) or None (接触面上一点，关节局部坐标；若不提供则走默认地面)
         """
         contact_by_joint: Dict[str, Dict[str, Any]] = {}
 
@@ -113,7 +113,7 @@ class PhysicsOptimizer:
             c_list = contact.get("c") or []
             p_list = contact.get("p", None)
             n_list = contact.get("n", None)
-            p0_list = contact.get("p0", None)
+            p0_local_list = contact.get("p0_local", None)
             n = min(len(order), len(c_list))
             for i in range(n):
                 jn = str(order[i])
@@ -135,75 +135,15 @@ class PhysicsOptimizer:
                         n_vec = np.asarray(n_list[i], dtype=np.float64).reshape(3)
                     except Exception:
                         n_vec = None
-                p0_vec = None
-                if isinstance(p0_list, list) and i < len(p0_list):
+                p0_local_vec = None
+                if isinstance(p0_local_list, list) and i < len(p0_local_list):
                     try:
-                        p0_vec = np.asarray(p0_list[i], dtype=np.float64).reshape(3)
+                        p0_local_vec = np.asarray(p0_local_list[i], dtype=np.float64).reshape(3)
                     except Exception:
-                        p0_vec = None
+                        p0_local_vec = None
 
-                contact_by_joint[jn] = {"c": c_val, "p": p4, "n": n_vec, "p0": p0_vec}
+                contact_by_joint[jn] = {"c": c_val, "p": p4, "n": n_vec, "p0_local": p0_local_vec}
             return contact_by_joint
-
-        # 方案B：joints dict
-        joints = contact.get("joints")
-        if isinstance(joints, dict):
-            for jn, payload in joints.items():
-                c_val = 0.0
-                p4 = None
-                n_vec = None
-                p0_vec = None
-                if isinstance(payload, dict):
-                    try:
-                        c_val = float(payload.get("c", 0.0))
-                    except Exception:
-                        c_val = 0.0
-                    if "p" in payload:
-                        try:
-                            p4 = np.asarray(payload.get("p"), dtype=np.float32).reshape(4)
-                        except Exception:
-                            p4 = None
-                    if "n" in payload:
-                        try:
-                            n_vec = np.asarray(payload.get("n"), dtype=np.float64).reshape(3)
-                        except Exception:
-                            n_vec = None
-                    if "p0" in payload:
-                        try:
-                            p0_vec = np.asarray(payload.get("p0"), dtype=np.float64).reshape(3)
-                        except Exception:
-                            p0_vec = None
-                contact_by_joint[str(jn)] = {"c": c_val, "p": p4, "n": n_vec, "p0": p0_vec}
-            return contact_by_joint
-
-        # 兼容：若用户直接传 { "LHIP": {"c":..,"p":[..]} , ... }
-        for k, v in contact.items():
-            if k in ("v", "order", "c", "p", "joints"):
-                continue
-            if isinstance(v, dict) and ("c" in v or "p" in v):
-                try:
-                    c_val = float(v.get("c", 0.0))
-                except Exception:
-                    c_val = 0.0
-                p4 = None
-                if "p" in v:
-                    try:
-                        p4 = np.asarray(v.get("p"), dtype=np.float32).reshape(4)
-                    except Exception:
-                        p4 = None
-                n_vec = None
-                p0_vec = None
-                if "n" in v:
-                    try:
-                        n_vec = np.asarray(v.get("n"), dtype=np.float64).reshape(3)
-                    except Exception:
-                        n_vec = None
-                if "p0" in v:
-                    try:
-                        p0_vec = np.asarray(v.get("p0"), dtype=np.float64).reshape(3)
-                    except Exception:
-                        p0_vec = None
-                contact_by_joint[str(k)] = {"c": c_val, "p": p4, "n": n_vec, "p0": p0_vec}
 
         return contact_by_joint
 
@@ -298,28 +238,10 @@ class PhysicsOptimizer:
             # 记录失败不应影响主流程
             pass
         v_ref = jvel if isinstance(jvel, np.ndarray) else jvel.numpy()  # 神经网络预测的关节速度
-        # contact 既可能来自网络输出（torch.Tensor），也可能来自Unity传入（list/np.ndarray），或新结构 dict/json
-        contact_by_joint: Optional[Dict[str, Dict[str, Any]]] = None
-        if isinstance(contact, torch.Tensor):
-            c_ref = contact.sigmoid().detach().cpu().numpy().astype(np.float32).reshape(-1)
-        elif contact is None:
-            c_ref = np.zeros((0,), dtype=np.float32)
-        elif isinstance(contact, dict):
-            c_ref = np.zeros((0,), dtype=np.float32)
-            contact_by_joint = self._parse_contact_dict(contact)
-        else:
-            c_ref = np.asarray(contact, dtype=np.float32).reshape(-1)
-
-        # 已移除旧格式 contact=10个float（2+8：每脚4点mask）。
-        # 兼容极简结构（2 floats）：仅左右脚接触程度（与论文一致，也用于网络输出）。
-        if (not isinstance(contact, torch.Tensor)) and (not isinstance(contact, dict)) and (c_ref.size == 10):
-            raise ValueError("已移除旧格式 contact=10个float（2+8）。请改用 dict/json 新结构。")
-
-        foot_stable = np.zeros(2, dtype=np.float32)
-        if c_ref.size >= 1:
-            foot_stable[0] = float(c_ref[0])
-        if c_ref.size >= 2:
-            foot_stable[1] = float(c_ref[1])
+        # 仅保留 dict/json 结构的 contact 输入
+        if not isinstance(contact, dict):
+            raise TypeError("contact 必须为 dict/json 结构（按关节提供 c/p/n/p0 等字段）。")
+        contact_by_joint: Dict[str, Dict[str, Any]] = self._parse_contact_dict(contact)
 
         a_ref = acc.numpy() if isinstance(acc, torch.Tensor) else np.array(acc)   # IMU传感器测量的加速度
         q = self.q
@@ -356,41 +278,35 @@ class PhysicsOptimizer:
         collision_point_meta = []
 
         # 对“无滑动约束”使用的接触程度（0~1）：joint_name -> c
-        # - dict contact：使用每个关节自己的 c
-        # - 非 dict contact：目前只支持左右脚（2 floats），因此这里只会包含 LFOOT/RFOOT
         contact_degree_by_joint = {}
-        if contact_by_joint is not None:
-            for jn in contact_by_joint:
-                try:
-                    contact_degree_by_joint[str(jn)] = float(contact_by_joint[jn].get("c", 0.0))
-                except Exception:
-                    contact_degree_by_joint[str(jn)] = 0.0
-        else:
-            # 仅 2 floats：左右脚接触程度
-            contact_degree_by_joint["LFOOT"] = float(foot_stable[0])
-            contact_degree_by_joint["RFOOT"] = float(foot_stable[1])
+        for jn in contact_by_joint:
+            try:
+                contact_degree_by_joint[str(jn)] = float(contact_by_joint[jn].get("c", 0.0))
+            except Exception:
+                contact_degree_by_joint[str(jn)] = 0.0
 
         def _add_contact_point(
             joint_name: str,
             joint_id: int,
-            pos: np.ndarray,
             point_i: int,
             point_map: Optional[dict],
             surface_n: np.ndarray,
             surface_p0: np.ndarray,
+            center_p: np.ndarray,
         ):
             """
             添加一个接触点到QP（collision_points + Jacobian），并可选记录脚底点映射。
 
             Route-B: 每个接触点带接触面 (n, p0)；并保存局部基 R_T（把世界向量转到 [t1,n,t2] 坐标）。
             """
-            ps = self.support_polygon[point_i] + pos
+            n_unit = self._safe_unit_vector(surface_n, np.array([0.0, 1.0, 0.0], dtype=np.float64))
+            t1, t2 = self._make_tangent_basis(n_unit)
+            offset = self.support_polygon[point_i]
+            ps = center_p + t1 * float(offset[0]) + t2 * float(offset[2])
             collision_points.append(ps)
             pb = self.model.calc_base_to_body_coordinates(q, joint_id, ps)
             point_label = foot_point_labels[point_i] if point_i < 4 else f"point-{point_i}"
 
-            n_unit = self._safe_unit_vector(surface_n, np.array([0.0, 1.0, 0.0], dtype=np.float64))
-            t1, t2 = self._make_tangent_basis(n_unit)
             R_T = np.vstack([t1.reshape(1, 3), n_unit.reshape(1, 3), t2.reshape(1, 3)]).astype(np.float64)
 
             collision_point_meta.append(
@@ -412,78 +328,69 @@ class PhysicsOptimizer:
             joint_id = vars(Body)[joint_name]
             pos = self.model.calc_body_position(q, joint_id)
 
-            # 新结构：全关节 contact (c + p4) 优先（替代高度阈值接触判定；保留防穿模兜底）
-            if contact_by_joint is not None:
-                payload = contact_by_joint.get(joint_name, None)
-                c_val = 0.0
-                p4 = None
-                n_vec = None
-                p0_vec = None
-                if isinstance(payload, dict):
-                    try:
-                        c_val = float(payload.get("c", 0.0))
-                    except Exception:
-                        c_val = 0.0
-                    p4 = payload.get("p", None)
-                    n_vec = payload.get("n", None)
-                    p0_vec = payload.get("p0", None)
+            # 新结构：全关节 contact (c + p4)
+            payload = contact_by_joint.get(joint_name, None)
+            p4 = None
+            n_vec = None
+            p0_local_vec = None
+            if isinstance(payload, dict):
+                p4 = payload.get("p", None)
+                n_vec = payload.get("n", None)
+                p0_local_vec = payload.get("p0_local", None)
 
-                # 接触点判定：严格以 p4（显式指定每个点是否接触）为准。
-                # - 只要 p4 中有任意点被激活，就认为该关节接触；只加入被激活的点。
-                # - c_val（接触程度）不参与“是否接触/有哪些接触点”的判断，只用于后面的“无滑动约束阈值”。
-                use_indices = []
-                if p4 is not None:
+            # 接触点判定：严格以 p4（显式指定每个点是否接触）为准。
+            # - 只要 p4 中有任意点被激活，就认为该关节接触；只加入被激活的点。
+            # - c（接触程度）不参与“是否接触/有哪些接触点”的判断，只用于后面的“无滑动约束阈值”。
+            use_indices = []
+            if p4 is not None:
+                p4_arr = None
+                try:
+                    p4_arr = np.asarray(p4, dtype=np.float32).reshape(-1)
+                except Exception:
                     p4_arr = None
-                    try:
-                        p4_arr = np.asarray(p4, dtype=np.float32).reshape(-1)
-                    except Exception:
-                        p4_arr = None
 
-                    if p4_arr is not None and p4_arr.size >= 4:
-                        i = 0
-                        while i < 4:
-                            try:
-                                if float(p4_arr[i]) > 0.5:
-                                    use_indices.append(int(i))
-                            except Exception:
-                                pass
-                            i += 1
+                if p4_arr is not None and p4_arr.size >= 4:
+                    i = 0
+                    while i < 4:
+                        try:
+                            if float(p4_arr[i]) > 0.5:
+                                use_indices.append(int(i))
+                        except Exception:
+                            pass
+                        i += 1
 
-                if len(use_indices) > 0:
-                    collision_joints.append(joint_name)
-                    point_map = None
-                    if joint_id == Body.LFOOT:
-                        point_map = left_point_to_collision_idx
-                    elif joint_id == Body.RFOOT:
-                        point_map = right_point_to_collision_idx
+            if len(use_indices) > 0:
+                collision_joints.append(joint_name)
+                point_map = None
+                if joint_id == Body.LFOOT:
+                    point_map = left_point_to_collision_idx
+                elif joint_id == Body.RFOOT:
+                    point_map = right_point_to_collision_idx
 
-                    # 默认接触面：地面（y=floor_y）。Route-B 下若用户提供 n/p0 则覆盖默认。
-                    floor_y = float(self.params.get("floor_y", 0.0))
-                    default_n = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-                    default_p0 = np.array([0.0, floor_y, 0.0], dtype=np.float64)
-                    surface_n = default_n if n_vec is None else np.asarray(n_vec, dtype=np.float64).reshape(3)
-                    surface_p0 = default_p0 if p0_vec is None else np.asarray(p0_vec, dtype=np.float64).reshape(3)
+                # 默认接触面：地面（y=floor_y）。Route-B 下若用户提供 n/p0_local 则覆盖默认。
+                floor_y = float(self.params.get("floor_y", 0.0))
+                default_n = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+                default_p0 = np.array([0.0, floor_y, 0.0], dtype=np.float64)
+                surface_n = default_n if n_vec is None else np.asarray(n_vec, dtype=np.float64).reshape(3)
+                if p0_local_vec is not None:
+                    p0_local = np.asarray(p0_local_vec, dtype=np.float64).reshape(3)
+                    center_p = self.model.calc_body_to_base_coordinates(q, joint_id, p0_local)
+                    surface_p0 = center_p
+                else:
+                    surface_p0 = default_p0
+                    n_unit = self._safe_unit_vector(surface_n, default_n)
+                    center_p = pos - n_unit * float(np.dot(n_unit, pos - surface_p0))
 
-                    for point_i in use_indices:
-                        _add_contact_point(joint_name, joint_id, pos, int(point_i), point_map, surface_n, surface_p0)
-                continue
-
-            # 非 dict 输入时：仅保留“左右脚接触判定 + 防穿模兜底”。
-            # - Unity dict 模式下，接触完全由上层决定，不走这里。
-            # - 网络输出/极简输入（2 floats）时，只提供左右脚概率，因此这里也只对脚生效。
-            floor_y = float(self.params["floor_y"])
-            if joint_id in (Body.LFOOT, Body.RFOOT):
-                is_left = (joint_id == Body.LFOOT)
-                prob = float(foot_stable[0] if is_left else foot_stable[1])
-                # 3cm 门控（论文脚部判定的一部分）+ 防穿模兜底（脚低于地面时强制接触）
-                should_contact = (prob > 0.5 and pos[1] <= floor_y + 0.03) or (pos[1] <= floor_y)
-                if should_contact:
-                    collision_joints.append(joint_name)
-                    point_map = left_point_to_collision_idx if is_left else right_point_to_collision_idx
-                    surface_n = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-                    surface_p0 = np.array([0.0, float(floor_y), 0.0], dtype=np.float64)
-                    for point_i in range(4):
-                        _add_contact_point(joint_name, joint_id, pos, point_i, point_map, surface_n, surface_p0)
+                for point_i in use_indices:
+                    _add_contact_point(
+                        joint_name,
+                        joint_id,
+                        int(point_i),
+                        point_map,
+                        surface_n,
+                        surface_p0,
+                        center_p,
+                    )
                     
         Js = np.vstack(Js)
         nc = len(collision_points)
@@ -642,7 +549,9 @@ class PhysicsOptimizer:
                     # 需要左右脚都在接触集合里
                     left_indices = sorted(left_point_to_collision_idx.values())
                     right_indices = sorted(right_point_to_collision_idx.values())
-                    if len(left_indices) > 0 and len(right_indices) > 0 and float(foot_stable[0]) >= stable_min and float(foot_stable[1]) >= stable_min:
+                    left_stable = float(contact_degree_by_joint.get("LFOOT", 0.0))
+                    right_stable = float(contact_degree_by_joint.get("RFOOT", 0.0))
+                    if len(left_indices) > 0 and len(right_indices) > 0 and left_stable >= stable_min and right_stable >= stable_min:
                         # 估计左右脚中心（用当前参与QP的接触点平均；8点全接触时就是各4点均值）
                         pL = np.mean(np.asarray([collision_points[i] for i in left_indices], dtype=np.float64), axis=0)
                         pR = np.mean(np.asarray([collision_points[i] for i in right_indices], dtype=np.float64), axis=0)
@@ -943,7 +852,7 @@ class PhysicsOptimizer:
         # [Repo实现差异] 这里最终把 self.q 直接回贴到 q_ref（而非积分得到的 q），属于工程折中：
         # - 好处：姿态更贴近网络输出，减少积分漂移；
         # - 代价：动力学积分状态与输出姿态不完全一致（但 qdot/λ/τ 仍来自QP）。
-        self.q = q
+        self.q = q_ref
         self.qdot = qdot
         self.last_x = x
 
