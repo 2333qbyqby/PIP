@@ -181,6 +181,7 @@ class PhysicsOptimizer:
         self.last_x = []
         self.q = None
         self.qdot = np.zeros(self.model.qdot_size)
+        self.prev_contact_force_by_meta = {}
         self.reset_states()
         self.frame_idx = 0
 
@@ -221,6 +222,7 @@ class PhysicsOptimizer:
         self.last_x = []
         self.q = None
         self.qdot = np.zeros(self.model.qdot_size)
+        self.prev_contact_force_by_meta = {}
         self.frame_idx = 0
 
     def optimize_frame(self, pose, jvel, contact, acc):
@@ -397,7 +399,7 @@ class PhysicsOptimizer:
 
         # === Debug: print contact joints & contact points each frame ===
         # 开关：physics_parameters.json -> debug_print_contacts = 1
-        if float(self.params.get("debug_print_contacts", 0.0)) > 0.5:
+        if (True):
             try:
                 print(f"[contacts] frame={frame_idx} nc={nc} joints={collision_joints}")
                 for i in range(min(nc, len(collision_point_meta))):
@@ -531,6 +533,7 @@ class PhysicsOptimizer:
                 A = art.math.block_diagonal_matrix_np(A)
                 As2.append(A * self.params['coeff_lambda'])
                 bs2.append(np.zeros(nc * 3))
+
 
         # [Repo扩展/非论文] 基于“重心投影”的左右脚法向力(Fy)分配先验（soft penalty）
         # 你提到的诉求：双脚8点都触地时，希望左右脚承重大小能随重心偏移而变化。
@@ -891,6 +894,7 @@ class PhysicsOptimizer:
                 point_label = str(meta.get("point_label", "")) if isinstance(meta, dict) else ""
                 key = (joint_name, point_label)
                 contact_force_by_meta[key] = grf_components[idx].tolist()
+        self.prev_contact_force_by_meta = contact_force_by_meta
 
         contacts = []
         for joint_name in self.test_contact_joints:
