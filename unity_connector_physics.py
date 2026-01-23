@@ -40,7 +40,6 @@ class PhysicsOptimizerAdapter:
         velocitys = np.array([])
         # contact：仅支持
         # - 新结构：dict/json（全关节 c+p4），交由 dynamics.py 解析
-        # - 2 floats：仅左右脚接触程度（网络输出/极简输入）
         contact_payload: Any
         if contact is None or isinstance(contact, dict):
             contact_payload = contact
@@ -49,7 +48,12 @@ class PhysicsOptimizerAdapter:
             if len(processed_contact) == 10:
                 raise ValueError("已移除旧格式 contact=10个float（2+8）。请改用 dict/json 新结构。")
             contact_payload = processed_contact
-
+        ext_force_payload = None
+        acc_payload = acc
+        if isinstance(contact, dict):
+            ext_force_payload = contact.get('ext_force')
+            if acc is None:
+                acc_payload = contact.get('acc')
         if len(pose_data) == 216:
             rotation_matrices = []
             for i in range(24):

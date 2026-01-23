@@ -225,7 +225,7 @@ class PhysicsOptimizer:
         self.prev_contact_force_by_meta = {}
         self.frame_idx = 0
 
-    def optimize_frame(self, pose, jvel, contact, acc):
+    def optimize_frame(self, pose, jvel, contact, acc = None, ext_force = None):
         frame_idx = int(self.frame_idx)
         self.frame_idx += 1
         # === 论文符号对照 ===
@@ -244,7 +244,7 @@ class PhysicsOptimizer:
         if not isinstance(contact, dict):
             raise TypeError("contact 必须为 dict/json 结构（按关节提供 c/p/n/p0 等字段）。")
         contact_by_joint: Dict[str, Dict[str, Any]] = self._parse_contact_dict(contact)
-
+        
         a_ref = acc.numpy() if isinstance(acc, torch.Tensor) else np.array(acc)   # IMU传感器测量的加速度
         q = self.q
         qdot = self.qdot
@@ -596,6 +596,13 @@ class PhysicsOptimizer:
                 np.eye(self.model.qdot_size - 6) * self.params['coeff_tau']#关节扭矩约束
             ]))
             bs3.append(np.zeros(self.model.qdot_size))
+            # 额外软约束：进一步压小虚拟力（τ[:6]）
+            if True:
+                virtual_soft_coeff = 1.0  # 硬编码权重
+                extra = np.zeros((self.model.qdot_size, self.model.qdot_size), dtype=np.float64)
+                extra[:6, :6] = np.eye(6, dtype=np.float64) * virtual_soft_coeff
+                As3.append(extra)
+                bs3.append(np.zeros(self.model.qdot_size))
         # === Sliding / Anti-penetration Constraints（论文 Eq.7: ṙ_j(q̈) ∈ C, Page 6）===
         # 论文：对“接触关节/接触点”的速度施加边界，水平滑动速度 < σ，同时防止向下穿透。
         # 实现：逐接触点构造约束（更符合“接触点由上层输入决定”的设定）。
@@ -691,29 +698,7 @@ class PhysicsOptimizer:
                     Gs2.append(art.math.block_diagonal_matrix_np(nn_blocks))
                     hs2.append(np.zeros(nc, dtype=np.float64))
 
-        # === [Repo扩展] Total GRF Normal Upper Bound（硬约束）===
-        # Route-B: 不再固定用 Fy，而是约束“所有接触点的法向力分量”合力上限：
-        #   Σ_i (n_i^T f_i) <= k * m * g
-        # - k 通过 physics_parameters.json 的 max_total_grf_y_multiple 配置（默认建议 3.0）
-        # - m 为 (人体质量 + 外载荷质量)：
-        #   * 人体质量 self.body_mass_kg（优先读取 params['body_mass_kg']，否则从URDF惯性质量汇总）
-        #   * 外载荷质量：dumbbell_mass_left_kg / dumbbell_mass_right_kg（点质量模型）
-        # - 这是线性不等式，可直接加到 λ 的 Gx<=h 里（G2 * lambda <= h2）
-        if True:
-            if nc > 0:
-                k = float(self.params.get('max_total_grf_y_multiple', 0.0))
-                if k > 0.0 and float(self.body_mass_kg) > 0.0 and float(self.gravity) > 0.0:
-                    mL = float(self.params.get('dumbbell_mass_left_kg', 0.0))
-                    mR = float(self.params.get('dumbbell_mass_right_kg', 0.0))
-                    total_mass = float(self.body_mass_kg) + max(mL, 0.0) + max(mR, 0.0)
-                    fy_max = k * total_mass * float(self.gravity)
-                    row = np.zeros((nc * 3,), dtype=np.float64)
-                    for i in range(nc):
-                        meta = collision_point_meta[i] if i < len(collision_point_meta) else {}
-                        n_i = np.asarray(meta.get("surface_n", [0.0, 1.0, 0.0]), dtype=np.float64).reshape(3)
-                        row[i * 3: i * 3 + 3] += n_i
-                    Gs2.append(row.reshape(1, -1))
-                    hs2.append(np.asarray([fy_max], dtype=np.float64))
+        
         # === Equation of Motion（论文 Eq.7: M q̈ + h = Jcᵀ λ + τ）===
         # 将动力学方程写成线性等式约束 A_ x = b_：
         #   [-M,  Jᵀ,  I] [q̈, λ, τ]ᵀ = h
@@ -721,50 +706,73 @@ class PhysicsOptimizer:
             M = self.model.calc_M(q)
             h = self.model.calc_h(q, qdot)
 
-            # === [Repo扩展/哑铃外载荷] 动态点质量外力并入动力学（仍保持线性QP）===
-            # 设哑铃为“绑在手上的点质量” m，手点世界加速度：
-            #   a_hand = J_hand(q) q̈ + Jdot_hand(q,qdot) qdot
-            # 哑铃对手的反作用力（世界坐标，y-up）：
-            #   f = m (g_vec - a_hand),  其中 g_vec = [0, -g, 0]^T
-            # 外力对应的广义力：
-            #   Q = J_hand^T f = J^T m g_vec - m J^T J q̈ - m J^T (Jdot qdot)
-            # 代入 M q̈ + h = Jc^T λ + τ + Q 得：
-            #   (M + m J^T J) q̈ + h + m J^T (Jdot qdot) - J^T m g_vec = Jc^T λ + τ
-            # 写成当前实现的线性等式形式：
-            #   [-(M + m J^T J), Jc^T, I] [q̈, λ, τ]^T = h + m J^T (Jdot qdot) - J^T m g_vec
             M_eff = M.astype(np.float64, copy=True)
             b_eff = h.astype(np.float64, copy=True)
+            if ext_force is None and isinstance(contact, dict):
+                ext_force = contact.get('ext_force')
+            Q_ext = np.zeros(self.model.qdot_size, dtype=np.float64)
+            ext_force_y_total = 0.0
 
-            g_vec = np.array([0.0, -float(self.gravity), 0.0], dtype=np.float64)
-            
-            mL = float(self.params.get('dumbbell_mass_left_kg', 0.0))
-            mR = float(self.params.get('dumbbell_mass_right_kg', 0.0))
-
-            def _add_hand_point_mass(body_id, m_kg: float):
-                nonlocal M_eff, b_eff
-                if m_kg <= 0.0:
+            def _add_ext_force(joint_name:str, f_val, p_local_val = None):
+                try:
+                    joint_id = vars(Body)[str(joint_name)]
+                    f_vec = np.asarray(f_val, dtype=np.float64).reshape(3)
+                    nonlocal ext_force_y_total
+                    ext_force_y_total += float(f_vec[1])
+                    if p_local_val is None:
+                        p_local = np.zeros(3, dtype=np.float64)
+                    else:
+                        p_local = np.asarray(p_local_val, dtype=np.float64).reshape(3)
+                    J = self.model.calc_point_Jacobian(q, joint_id, p_local)
+                    nonlocal_Q = J.T @ f_vec
+                except Exception:
                     return
-                
-                # 硬编码偏移：点在“手link局部坐标系”里，先用 10cm 量级试
-                if body_id == Body.LHAND:
-                    offset_b = np.array([0.0, 0.0, 0.00], dtype=np.float64)
-                elif body_id == Body.RHAND:
-                    offset_b = np.array([0.0, 0.0, 0.00], dtype=np.float64)
-                else:
-                    offset_b = np.zeros(3, dtype=np.float64)
-                J = self.model.calc_point_Jacobian(q, body_id, offset_b).astype(np.float64)
-                # 令 q̈=0 时的点加速度，主要是 Jdot*qdot（+ 其它科氏项；RBDL会给出一致的表达）
-                a0 = self.model.calc_point_acceleration(
-                    q, qdot, np.zeros(self.model.qdot_size, dtype=np.float64), body_id, offset_b
-                ).astype(np.float64)
-                M_eff = M_eff + float(m_kg) * (J.T @ J)
-                b_eff = b_eff + float(m_kg) * (J.T @ a0) - (J.T @ (float(m_kg) * g_vec))
+                nonlocal Q_ext
+                Q_ext += nonlocal_Q
 
-            _add_hand_point_mass(Body.LHAND, mL)
-            _add_hand_point_mass(Body.RHAND, mR)
+            if isinstance(ext_force, dict):
+                # 仅支持：{ "ROOT":[fx,fy,fz], "LHAND":[fx,fy,fz], ... }
+                for joint_name, f_val in ext_force.items():
+                    _add_ext_force(joint_name, f_val, None)
+            if np.any(Q_ext):
+                b_eff = b_eff - Q_ext
+
 
             A_ = np.hstack((-M_eff, Js.T, np.eye(self.model.qdot_size)))
             b_ = b_eff
+
+            # === [Hard Constraint] Total GRF Y-Force Band (Inequalities) ===
+            # 约束：F_target_y - thr <= Σ_i f_{i,y} <= F_target_y + thr
+            # 说明：这是世界坐标 Y 方向合力，不使用表面法向 n_i。
+            #       仅在存在接触点时启用，以避免无接触时不可行。
+            if(False):
+                if nc > 0:
+                    total_mass = float(self.body_mass_kg)
+                    if(ext_force_y_total is not None):
+                        ext_force_y_total = 0.0
+                    F_target_y = total_mass * float(self.gravity) - float(ext_force_y_total)
+                    F_thresh_y = 20.0   # 硬编码阈值（N）
+                    row_lambda = np.zeros((nc * 3,), dtype=np.float64)
+                    for i in range(nc):
+                        row_lambda[i * 3 + 1] = 1.0
+                    row = row_lambda.reshape(1, -1)
+                    Gs2.append(row)
+                    hs2.append(np.asarray([F_target_y + F_thresh_y], dtype=np.float64))
+                    Gs2.append(-row)
+                    hs2.append(np.asarray([-(F_target_y - F_thresh_y)], dtype=np.float64))
+
+            # === [Soft Constraint] Total GRF Y-Force Target (Least Squares) ===
+            # 软约束：最小化 (Σ_i f_{i,y} - F_target_y)^2
+            if True:
+                if nc > 0:
+                    total_mass = float(self.body_mass_kg)
+                    F_target_y = total_mass * float(self.gravity) - float(ext_force_y_total)
+                    F_soft_coeff = 1.0  # 硬编码权重
+                    row_lambda = np.zeros((nc * 3,), dtype=np.float64)
+                    for i in range(nc):
+                        row_lambda[i * 3 + 1] = 1.0
+                    As2.append(row_lambda.reshape(1, -1) * F_soft_coeff)
+                    bs2.append(np.asarray([F_target_y], dtype=np.float64))
 
         As1, bs1, As2, bs2, As3, bs3 = np.vstack(As1), np.concatenate(bs1), np.vstack(As2), np.concatenate(bs2), np.vstack(As3), np.concatenate(bs3)
         Gs1, hs1, Gs2, hs2, Gs3, hs3 = np.vstack(Gs1), np.concatenate(hs1), np.vstack(Gs2), np.concatenate(hs2), np.vstack(Gs3), np.concatenate(hs3)
