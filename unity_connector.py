@@ -190,10 +190,11 @@ if __name__ == "__main__":
                 received = connector.receive_data(timeout=0.01)  # 非阻塞检查
                 if not received:
                     time.sleep(1 / 60)
+                    print("没有接收到数据")
                     continue
 
                 pose, tran, cj, velocity = received
-                print(f"接收到数据: pose长度={len(pose)}, tran长度={len(tran)}")
+                print(f"接收到数据: pose长度={len(pose)}, tran长度={len(tran)}，cj长度={len(cj)}，velocity长度={len(velocity)}")
 
                 result = connector.optimize_frame_with_physics(pose, velocity, cj)
 
