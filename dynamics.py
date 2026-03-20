@@ -544,7 +544,7 @@ class PhysicsOptimizer:
         #   用 CoM 在左右脚中心连线 (xz 平面) 上的投影得到 α∈[0,1]（α=0靠左脚，α=1靠右脚）
         #   期望比例 Fy_R / (Fy_L + Fy_R) ≈ α
         #   等价线性形式： (1-α) Fy_R - α Fy_L ≈ 0
-        if True:
+        if False:  # 临时关闭：重心投影驱动的左右脚承重软约束
             if nc > 0:
                 coeff = float(self.params.get('com_load_balance_coeff', 0.0))
                 if coeff > 0.0:
