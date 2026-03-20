@@ -535,30 +535,30 @@ class PhysicsOptimizer:
                 bs2.append(np.zeros(nc * 3))
 
 
-        # [Repo扩展/非论文] 基于“重心投影”的左右脚法向力(Fy)分配先验（soft penalty）
-        # 你提到的诉求：双脚8点都触地时，希望左右脚承重大小能随重心偏移而变化。
-        # 现有实现只靠动力学平衡 + 正则，双支撑时 λ 分配往往冗余，容易趋向均分/数值偏置。
-        
-        # 这里采用一个保持QP线性的“比例先验”：
-        #   设 Fy_L = Σ_{i∈L} Fy_i, Fy_R = Σ_{i∈R} Fy_i
-        #   用 CoM 在左右脚中心连线 (xz 平面) 上的投影得到 α∈[0,1]（α=0靠左脚，α=1靠右脚）
-        #   期望比例 Fy_R / (Fy_L + Fy_R) ≈ α
-        #   等价线性形式： (1-α) Fy_R - α Fy_L ≈ 0
+        # [Repo扩展/非论文] 基于“重心投影”的接触法向力分配先验（soft penalty）
+        # 目标：让所有接触点的法向力合力在 xz 平面的作用线尽量通过 CoM 投影。
+        # 线性形式（使用 fn = n^T f）：
+        #   Σ_i fn_i * (p_i_x - com_x) ≈ 0
+        #   Σ_i fn_i * (p_i_z - com_z) ≈ 0
         if True:
             if nc > 0:
                 coeff = float(self.params.get('com_load_balance_coeff', 0.0))
                 if coeff > 0.0:
                     stable_min = float(self.params.get('com_load_balance_stable_min', 0.5))
-                    # 需要左右脚都在接触集合里
-                    left_indices = sorted(left_point_to_collision_idx.values())
-                    right_indices = sorted(right_point_to_collision_idx.values())
-                    left_stable = float(contact_degree_by_joint.get("LFOOT", 0.0))
-                    right_stable = float(contact_degree_by_joint.get("RFOOT", 0.0))
-                    if len(left_indices) > 0 and len(right_indices) > 0 and left_stable >= stable_min and right_stable >= stable_min:
-                        # 估计左右脚中心（用当前参与QP的接触点平均；8点全接触时就是各4点均值）
-                        pL = np.mean(np.asarray([collision_points[i] for i in left_indices], dtype=np.float64), axis=0)
-                        pR = np.mean(np.asarray([collision_points[i] for i in right_indices], dtype=np.float64), axis=0)
+                    # 使用所有参与QP的接触点，按关节平均稳定度做启用判断
+                    joint_names = set()
+                    for meta_i in collision_point_meta[:nc]:
+                        if isinstance(meta_i, dict):
+                            jn = str(meta_i.get("joint_name", ""))
+                            if jn:
+                                joint_names.add(jn)
+                    if len(joint_names) > 0:
+                        stable_vals = [float(contact_degree_by_joint.get(jn, 1.0)) for jn in joint_names]
+                        stable_avg = float(np.mean(stable_vals)) if len(stable_vals) > 0 else 1.0
+                    else:
+                        stable_avg = 1.0
 
+                    if stable_avg >= stable_min:
                         # 估计CoM：直接使用 RBDLModel 的 CalcCenterOfMass 封装
                         # 注意：不同 pyrbdl 版本可能没有该接口/签名不同，如遇异常则退化为 root 位置。
                         try:
@@ -566,25 +566,29 @@ class PhysicsOptimizer:
                         except Exception:
                             com = np.asarray(q[:3], dtype=np.float64).reshape(3)
 
-                        # 在xz平面做投影比例
-                        d = (pR[[0, 2]] - pL[[0, 2]]).astype(np.float64)
-                        denom = float(np.dot(d, d))
-                        if denom > 1e-10:
-                            t = float(np.dot((com[[0, 2]] - pL[[0, 2]]).astype(np.float64), d) / denom)
-                            alpha = float(np.clip(t, 0.0, 1.0))
+                        pts = np.asarray([collision_points[i] for i in range(nc)], dtype=np.float64)
+                        pts_xz = pts[:, [0, 2]]
+                        ref_xz = np.mean(pts_xz, axis=0) if pts_xz.size > 0 else np.zeros(2, dtype=np.float64)
+                        spread = float(np.max(np.sum((pts_xz - ref_xz) ** 2, axis=1))) if pts_xz.size > 0 else 0.0
 
-                            row = np.zeros((nc * 3,), dtype=np.float64)
+                        if spread > 1e-8:
+                            row_x = np.zeros((nc * 3,), dtype=np.float64)
+                            row_z = np.zeros((nc * 3,), dtype=np.float64)
+                            com_x = float(com[0])
+                            com_z = float(com[2])
+
                             # Route-B: “法向力”不再固定为 Fy，而是 fn = n^T f。
-                            for i in right_indices:
+                            for i in range(nc):
                                 meta_i = collision_point_meta[i] if i < len(collision_point_meta) else {}
                                 n_i = np.asarray(meta_i.get("surface_n", [0.0, 1.0, 0.0]), dtype=np.float64).reshape(3)
-                                row[i * 3: i * 3 + 3] += (1.0 - alpha) * n_i
-                            for i in left_indices:
-                                meta_i = collision_point_meta[i] if i < len(collision_point_meta) else {}
-                                n_i = np.asarray(meta_i.get("surface_n", [0.0, 1.0, 0.0]), dtype=np.float64).reshape(3)
-                                row[i * 3: i * 3 + 3] += (-alpha) * n_i
+                                dx = float(collision_points[i][0]) - com_x
+                                dz = float(collision_points[i][2]) - com_z
+                                row_x[i * 3: i * 3 + 3] += n_i * dx
+                                row_z[i * 3: i * 3 + 3] += n_i * dz
 
-                            As2.append(row.reshape(1, -1) * coeff)
+                            As2.append(row_x.reshape(1, -1) * coeff)
+                            bs2.append(np.zeros((1,), dtype=np.float64))
+                            As2.append(row_z.reshape(1, -1) * coeff)
                             bs2.append(np.zeros((1,), dtype=np.float64))
 
         # E_res 与 E_τ：对 τ 的L2正则（论文 Eq.(9)：Eres = ||τ[:6]||^2, Eτ = ||τ[6:]||^2）
